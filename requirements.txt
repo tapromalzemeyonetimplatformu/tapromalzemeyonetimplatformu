@@ -1,0 +1,9 @@
+streamlit
+pandas
+openpyxl
+matplotlib
+plotly
+trimesh
+numpy
+scipy
+openai>=1.0.0
