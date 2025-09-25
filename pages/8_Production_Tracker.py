@@ -5,6 +5,11 @@ from datetime import datetime, date
 import streamlit as st
 import pandas as pd
 
+# ✅ Kullanıcı giriş kontrolü
+if "authenticated" not in st.session_state or not st.session_state.authenticated:
+    st.error("🔒 You must be logged in to access this page.")
+    st.stop()
+
 # ===============================
 # Helpers: Auth / Paths / DB
 # ===============================
@@ -314,3 +319,4 @@ else:
             st.code(str(row["Tests Planned/Done"]).strip() or "-", language="markdown")
             st.markdown("**Process Parameters**")
             st.code(str(row["Process Parameters"]).strip() or "-", language="markdown")
+
