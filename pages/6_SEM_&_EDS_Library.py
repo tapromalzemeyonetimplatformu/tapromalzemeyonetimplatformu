@@ -159,7 +159,8 @@ else:
         with expander:
             cA, cB, cC = st.columns([1, 1, 1])
             with cA:
-                st.markdown(f"**Producer:** {row['producer'] or '—'}")
+                st.markdown(f"**Tester:** {row['producer'] or '—'}")
+                st.markdown(f"**Raw Material, Direction and Angle:** {row['production_name'] or '-'}")
                 st.markdown(f"**Sample No.:** {row['sample_no'] or '—'}")
             with cB:
                 st.markdown(f"**Test Date:** {row['test_date'] or '—'}")
@@ -232,5 +233,6 @@ else:
                 save_records(new_df)
                 st.success("Entry deleted.")
                 st.rerun()
+
 
 
