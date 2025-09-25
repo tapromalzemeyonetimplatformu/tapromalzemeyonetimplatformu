@@ -1,10 +1,10 @@
-# 5_DSC_Library.py — DSC Library (fixed rerun, strict Type III, mW display, white plot)
-# - Auth guard
+# 5_DSC_Library.py — DSC Library (robust segmentation + unit autodetect + correct ΔH)
 # - Upload → Stage (md5 dedup) → Name → Add to Library
-# - Clean select list
-# - Heat Flow displayed in mW (table & plot)
-# - INTERNAL PHYSICS: mW → W → W/g (divide by mass), integrate over T and divide by β (°C/s) → J/g
-# - Type III STRICT: H2→(Tm, ΔHm, Tg), Cooling→(Tc, ΔHc), H1→(ΔHcc). No fallback.
+# - Auto-detect heat-flow unit (mW or W/g) and always compute with W/g
+# - Integrate over temperature and divide by β (°C/s) → J/g
+# - Type III preferred: H2→(Tg,Tm,ΔHm), Cooling→(Tc,ΔHc), H1→(ΔHcc)
+#   with robust fallbacks if a segment is missing
+# - White plot background; table/plot display Heat Flow in mW
 
 import io, re, math, uuid, hashlib
 from datetime import datetime
@@ -15,15 +15,15 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="DSC Library", page_icon="🔥", layout="wide")
 
-# ---------------- Utilities ------------------
+# ---------------- Utils ----------------
 def do_rerun():
-    """Safe rerun across Streamlit versions."""
-    try:
-        st.rerun()
-    except Exception:
-        pass  # swallow if rerun not available in this context
+    try: st.rerun()
+    except Exception: pass
 
-# ---------------- Auth Guard -----------------
+def clean_num(x):
+    return None if (x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x)))) else round(float(x), 2)
+
+# ---------------- Auth ----------------
 def require_auth():
     auth = (
         st.session_state.get("authenticated")
@@ -45,7 +45,7 @@ def require_auth():
 
 current_user = require_auth()
 
-# ---------------- Constants ------------------
+# --------------- Constants ---------------
 POLYMER_DH0_DEFAULTS = {"PEEK": 130.0, "PEKK": 130.0, "PPS": 112.0}
 HEADER_KEYS = {
     "sample": ["Sample", "Sample Name"],
@@ -55,7 +55,17 @@ HEADER_KEYS = {
     "file": ["File", "OrgFile"],
 }
 
-# ---------------- Parsing --------------------
+def default_ranges(material: str):
+    m = (material or "").upper()
+    if m.startswith("PEEK"):
+        return {"tg": (120, 170), "hm": (300, 385), "hc": (180, 280), "hcc": (150, 260)}
+    if m.startswith("PEKK"):
+        return {"tg": (130, 170), "hm": (290, 380), "hc": (160, 270), "hcc": (150, 260)}
+    if m.startswith("PPS"):
+        return {"tg": (70, 110), "hm": (240, 300), "hc": (150, 220), "hcc": (None, None)}
+    return {"tg": (50, 200), "hm": (150, 400), "hc": (80, 300), "hcc": (None, None)}
+
+# --------------- Parse .txt ---------------
 def parse_header_and_data(text: str):
     lines = text.splitlines()
     # first numeric line = data start
@@ -78,28 +88,23 @@ def parse_header_and_data(text: str):
                     if len(parts) >= 2:
                         H[k] = parts[1]
                         break
-            if k in H:
-                break
+            if k in H: break
 
     # sample mass (mg)
     sample_mass_mg = None
     for ln in header:
         if any(ln.strip().startswith(kw) for kw in HEADER_KEYS["size_mg"]):
             m = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*mg', ln, flags=re.I)
-            if m:
-                sample_mass_mg = float(m.group(1))
-                break
+            if m: sample_mass_mg = float(m.group(1)); break
 
     # heating rate from header: "Ramp X.XX C/min"
     heating_rate_header = None
     for ln in header:
         if any(ln.strip().startswith(kw) for kw in HEADER_KEYS["orgmethod"]):
             m = re.search(r'Ramp\s+([0-9]+(?:\.[0-9]+)?)\s*C\s*/\s*min', ln, flags=re.I)
-            if m:
-                heating_rate_header = float(m.group(1))
-                break
+            if m: heating_rate_header = float(m.group(1)); break
 
-    # data parse (≥3 cols: Time, Temp, HeatFlow). Assume HeatFlow is mW (total power).
+    # data parse (≥3 cols: Time, Temp, HeatFlow)
     if data_str.strip():
         df = pd.read_csv(io.StringIO(data_str), delim_whitespace=True, header=None, engine="python")
         if df.shape[1] >= 3:
@@ -121,14 +126,15 @@ def parse_header_and_data(text: str):
     }
     return meta, df[["Time", "Temp", "HeatFlow"]].copy()
 
-# ---------------- Segmentation ---------------
-def run_split(df: pd.DataFrame):
-    """Split into Heating1 → Cooling → Heating2 (robust)."""
+# ----------- Segment (robust + fallback) -----------
+def robust_segments(df: pd.DataFrame):
+    """Return H1, C, H2. If strict split fails, build a reasonable fallback."""
     if df.empty or len(df) < 50:
         return df.copy(), pd.DataFrame(), pd.DataFrame()
-    T = df["Temp"].to_numpy()
-    dT = np.diff(T, prepend=T[0])
 
+    T = df["Temp"].to_numpy()
+    # monotonicity breaks → blocks
+    dT = np.diff(T, prepend=T[0])
     from scipy.ndimage import uniform_filter1d
     dTs = uniform_filter1d(dT, size=41, mode="nearest")
     sign = np.sign(dTs)
@@ -149,36 +155,65 @@ def run_split(df: pd.DataFrame):
     C  = next(((a, b) for (a, b) in cools if H1 and a > H1[1]), None)
     H2 = next(((a, b) for (a, b) in heats if C and a > C[1]), None)
 
-    def slice_blk(blk):
+    def sl(blk): 
         return df.iloc[blk[0]:blk[1]].reset_index(drop=True) if blk else pd.DataFrame(columns=df.columns)
 
-    return slice_blk(H1), slice_blk(C), slice_blk(H2)
+    # If anything missing, build fallback:
+    if H2 is None and heats:
+        H2 = heats[-1]                         # last heating block as 2nd heating
+    if C is None and cools:
+        # choose the biggest negative-slope block between first and last heating if possible
+        C = cools[len(cools)//2] if len(cools) > 1 else cools[0]
+    if H1 is None and heats:
+        H1 = heats[0]
 
-def calc_heating_rate(df):
-    """Compute °C/min by linear regression."""
-    if df.empty or len(df) < 10:
-        return None
-    t = df["Time"].to_numpy()      # TA export: minutes
-    T = df["Temp"].to_numpy()
+    return sl(H1), sl(C), sl(H2)
+
+# ----------- Heating rate (segment-wise) -----------
+def slope_beta_C_per_min(df):
+    if df.empty or len(df) < 10: return None
+    t = df["Time"].to_numpy(); T = df["Temp"].to_numpy()
     q10, q90 = np.quantile(np.arange(len(T)), [0.1, 0.9]).astype(int)
-    if q90 <= q10:
-        return None
+    if q90 <= q10: return None
     tt = t[q10:q90]; TT = T[q10:q90]
     A = np.vstack([tt, np.ones_like(tt)]).T
-    m, _ = np.linalg.lstsq(A, TT, rcond=None)[0]  # °C per minute
-    return float(m)
+    m, _ = np.linalg.lstsq(A, TT, rcond=None)[0]
+    return float(m)  # °C/min (TA export genelde dakika)
 
-# ---------------- Analysis helpers -----------
+# ----------- Unit detection & transforms -----------
+def make_W_per_g_arrays(D: pd.DataFrame, sample_mass_mg: float):
+    """
+    Input D has columns Time, Temp, HeatFlow (unknown unit: mW or W/g).
+    Returns T, Y_Wpg and helper to render mW for display.
+    """
+    if D.empty or sample_mass_mg is None or sample_mass_mg <= 0:
+        return None, None, None
+
+    mass_g = sample_mass_mg / 1000.0
+    HF = D["HeatFlow"].to_numpy().astype(float)
+    # Heuristic: if |HF| median < 100 and mass < 0.05 g → very likely mW (total power)
+    med = float(np.nanmedian(np.abs(HF))) if HF.size else 0.0
+    assume_mW = (med < 100.0)  # DSC typical a few mW
+    if assume_mW:
+        Y_Wpg = (HF / 1000.0) / mass_g
+        to_mW_for_display = lambda y_wpg: (y_wpg * mass_g * 1000.0)  # back to mW for table/plot
+    else:
+        # already W/g
+        Y_Wpg = HF
+        to_mW_for_display = lambda y_wpg: (y_wpg * mass_g * 1000.0)
+    T = D["Temp"].to_numpy()
+    return T, Y_Wpg, to_mW_for_display
+
+# ----------- Math helpers -----------
 def line_baseline(x, y):
     y0, y1 = y[0], y[-1]; x0, x1 = x[0], x[-1]
     return y0 + (y1 - y0) * (x - x0) / (x1 - x0 + 1e-12)
 
-def area_J_per_g_over_T(T, Y_W_per_g, a, b, beta_C_per_s):
-    """Linear-baseline corrected area over T, then divide by β (°C/s) to get J/g."""
+def area_J_per_g_over_T(T, Y_Wpg, a, b, beta_C_per_s):
     m = (T >= a) & (T <= b)
     if not np.any(m) or beta_C_per_s is None or beta_C_per_s <= 0:
         return np.nan
-    x = T[m]; y = Y_W_per_g[m]
+    x = T[m]; y = Y_Wpg[m]
     base = line_baseline(x, y)
     area_Wpg_degC = float(np.trapz(y - base, x))     # [W/g * °C]
     return area_Wpg_degC / beta_C_per_s              # [J/g]
@@ -204,70 +239,57 @@ def tg_inflection(T, Y, a, b):
     idx = np.nanargmax(np.abs(dy))
     return float(x[idx])
 
-def default_ranges(material: str):
-    m = (material or "").upper()
-    if m.startswith("PEEK"):
-        return {"tg": (120, 170), "hm": (300, 385), "hc": (180, 280), "hcc": (150, 260)}
-    if m.startswith("PEKK"):
-        return {"tg": (130, 170), "hm": (290, 380), "hc": (160, 270), "hcc": (150, 260)}
-    if m.startswith("PPS"):
-        return {"tg": (70, 110),  "hm": (240, 300), "hc": (150, 220), "hcc": (None, None)}
-    return {"tg": (50, 200), "hm": (150, 400), "hc": (80, 300), "hcc": (None, None)}
-
-def compute_typeIII_strict(meta, df_all, H1, C, H2, material, dh0, polymer_frac, hr_calc):
-    """STRICT Type III (no fallback). Convert mW→W/g; divide by β (°C/s)."""
-    mass_mg = meta.get("sample_mass_mg")
-    mass_g = mass_mg / 1000.0 if mass_mg else None
-    beta_C_per_min = meta.get("heating_rate_header") or hr_calc   # °C/min
-    beta_C_per_s = (beta_C_per_min / 60.0) if beta_C_per_min else None
-
+# ----------- Core computation -----------
+def compute_typeIII(meta, df_all, H1, C, H2, material, dh0, polymer_frac, beta_hdr_or_est):
     R = default_ranges(material)
+    mass_mg = meta.get("sample_mass_mg")
 
-    def arr_Wpg(D):
-        if D.empty or not mass_g or mass_g <= 0:
-            return None, None
-        T = D["Temp"].to_numpy()
-        HF_mW = D["HeatFlow"].to_numpy()          # raw assumed mW (total power)
-        Y_Wpg = (HF_mW / 1000.0) / mass_g         # W/g
-        return T, Y_Wpg
+    # prefer per-segment β; if not available, use header/estimate
+    beta_H2 = slope_beta_C_per_min(H2) or beta_hdr_or_est
+    beta_C  = slope_beta_C_per_min(C)  or beta_hdr_or_est
+    beta_H1 = slope_beta_C_per_min(H1) or beta_hdr_or_est
 
-    results = {"Tg (°C)": None, "Tm (°C)": None, "Tc (°C)": None,
-               "ΔHm (J/g)": None, "ΔHcc (J/g)": None, "ΔHc (J/g)": None,
-               "Crystallinity Xc (%)": None}
+    res = {"Tg (°C)": None, "Tm (°C)": None, "Tc (°C)": None,
+           "ΔHm (J/g)": None, "ΔHcc (J/g)": None, "ΔHc (J/g)": None,
+           "Crystallinity Xc (%)": None}
 
-    # H2 required for Tg, Tm, ΔHm
-    if not H2.empty:
-        T2, Y2 = arr_Wpg(H2)
+    # ---- H2 for Tg, Tm, ΔHm (fallback: last heating block already ensured) ----
+    if not H2.empty and mass_mg:
+        T2, Y2, _to_mW = make_W_per_g_arrays(H2, mass_mg)
         if T2 is not None:
-            results["Tg (°C)"] = round(tg_inflection(T2, Y2, *R["tg"]), 2)
-            if beta_C_per_s:
-                hm_down = endo_is_down(T2, Y2, *R["hm"])
-                results["Tm (°C)"] = round(peak_T(T2, Y2, *R["hm"], mode=("min" if hm_down else "max")), 2)
-                dHm = area_J_per_g_over_T(T2, Y2, *R["hm"], beta_C_per_s)
-                if not (dHm is None or math.isnan(dHm)): results["ΔHm (J/g)"] = round(abs(dHm), 2)
+            res["Tg (°C)"] = clean_num(tg_inflection(T2, Y2, *R["tg"]))
+            hm_down = endo_is_down(T2, Y2, *R["hm"])
+            res["Tm (°C)"] = clean_num(peak_T(T2, Y2, *R["hm"], mode=("min" if hm_down else "max")))
+            beta_s = (beta_H2 or 0) / 60.0 if beta_H2 else None
+            dHm = area_J_per_g_over_T(T2, Y2, *R["hm"], beta_s)
+            if not (dHm is None or math.isnan(dHm)): res["ΔHm (J/g)"] = clean_num(abs(dHm))
 
-    # Cooling for Tc, ΔHc
-    if not C.empty and beta_C_per_s:
-        TcT, TcY = arr_Wpg(C)
+    # ---- Cooling for Tc, ΔHc ----
+    if not C.empty and mass_mg:
+        TcT, TcY, _ = make_W_per_g_arrays(C, mass_mg)
         if TcT is not None:
-            results["Tc (°C)"] = round(peak_T(TcT, TcY, *R["hc"], mode="min"), 2)
-            dHc = area_J_per_g_over_T(TcT, TcY, *R["hc"], beta_C_per_s)
-            if not (dHc is None or math.isnan(dHc)): results["ΔHc (J/g)"] = round(abs(dHc), 2)
+            res["Tc (°C)"] = clean_num(peak_T(TcT, TcY, *R["hc"], mode="min"))
+            beta_s = (beta_C or 0) / 60.0 if beta_C else None
+            dHc = area_J_per_g_over_T(TcT, TcY, *R["hc"], beta_s)
+            if not (dHc is None or math.isnan(dHc)): res["ΔHc (J/g)"] = clean_num(abs(dHc))
 
-    # H1 for ΔHcc
-    if not H1.empty and all(v is not None for v in R["hcc"]) and beta_C_per_s:
-        T1, Y1 = arr_Wpg(H1)
+    # ---- H1 for ΔHcc ----
+    if not H1.empty and mass_mg and all(v is not None for v in R["hcc"]):
+        T1, Y1, _ = make_W_per_g_arrays(H1, mass_mg)
         if T1 is not None:
-            dHcc = area_J_per_g_over_T(T1, Y1, *R["hcc"], beta_C_per_s)
-            if not (dHcc is None or math.isnan(dHcc)): results["ΔHcc (J/g)"] = round(abs(dHcc), 2)
+            beta_s = (beta_H1 or 0) / 60.0 if beta_H1 else None
+            dHcc = area_J_per_g_over_T(T1, Y1, *R["hcc"], beta_s)
+            if not (dHcc is None or math.isnan(dHcc)): res["ΔHcc (J/g)"] = clean_num(abs(dHcc))
 
-    # Xc
-    dHm = results["ΔHm (J/g)"]; dHcc = results["ΔHcc (J/g)"]
-    if dHm is not None and polymer_frac and dh0 and dh0 > 0:
-        corr = dHm - (dHcc or 0.0)
-        results["Crystallinity Xc (%)"] = round((corr / (dh0 * polymer_frac)) * 100.0, 2)
+    # ---- Xc ----
+    if res["ΔHm (J/g)"] is not None and dh0 and polymer_frac:
+        corr = res["ΔHm (J/g)"] - (res["ΔHcc (J/g)"] or 0.0)
+        res["Crystallinity Xc (%)"] = clean_num((corr / (dh0 * polymer_frac)) * 100.0)
 
-    return results, beta_C_per_s
+    betas_info = {
+        "β_H1": clean_num(beta_H1), "β_C": clean_num(beta_C), "β_H2": clean_num(beta_H2)
+    }
+    return res, betas_info
 
 # ---------------- State ----------------------
 st.title("DSC Library")
@@ -280,24 +302,19 @@ st.header("Upload")
 with st.form("uploader_form"):
     new_files = st.file_uploader("Upload DSC .txt files", type=["txt"], accept_multiple_files=True, key="dsc_uploader")
     staged = st.form_submit_button("Stage files")
-
 if staged and new_files:
     added = 0
     for f in new_files:
         content = f.getvalue()
         fid = hashlib.md5(content + f.name.encode()).hexdigest()
-        if fid in st.session_state["seen_upload_ids"]:
-            continue
+        if fid in st.session_state["seen_upload_ids"]: continue
         st.session_state["seen_upload_ids"].add(fid)
         st.session_state["pending_uploads"].append({
             "tmp_key": uuid.uuid4().hex, "file_id": fid, "orig_name": f.name,
             "bytes": content, "user_name": f.name
-        })
-        added += 1
-    if added:
-        st.success(f"{added} file(s) staged. Name them below, then add to library.")
-    st.session_state.pop("dsc_uploader", None)
-    do_rerun()
+        }); added += 1
+    if added: st.success(f"{added} file(s) staged. Name them below, then add to library.")
+    st.session_state.pop("dsc_uploader", None); do_rerun()
 
 # ----------- Pre-naming & Add to Library -----
 if st.session_state["pending_uploads"]:
@@ -311,8 +328,7 @@ if st.session_state["pending_uploads"]:
                 "uploader": current_user, "uploaded_at": now, "bytes": item["bytes"]
             }
             st.session_state["seen_upload_ids"].discard(item.get("file_id",""))
-        st.session_state["pending_uploads"].clear()
-        do_rerun()
+        st.session_state["pending_uploads"].clear(); do_rerun()
 
     remove_keys = []
     for item in st.session_state["pending_uploads"]:
@@ -340,17 +356,14 @@ if not st.session_state["dsc_files"]:
 else:
     for key, rec in list(st.session_state["dsc_files"].items()):
         c1, c2, c3, c4, c5 = st.columns([3, 3, 2, 2, 1])
-        c1.write(rec["orig_name"]); c2.write(rec["user_name"])
-        c3.write(rec["uploader"]); c4.write(rec["uploaded_at"])
+        c1.write(rec["orig_name"]); c2.write(rec["user_name"]); c3.write(rec["uploader"]); c4.write(rec["uploaded_at"])
         if c5.button("Delete", key=f"del_{key}"):
-            del st.session_state["dsc_files"][key]
-            do_rerun()
+            del st.session_state["dsc_files"][key]; do_rerun()
 
 # ---------------- Selection ------------------
 st.header("Select a file to analyze")
 def file_label(key: str) -> str:
-    rec = st.session_state["dsc_files"][key]
-    return f"{rec['user_name']} ({rec['orig_name']})"
+    rec = st.session_state["dsc_files"][key]; return f"{rec['user_name']} ({rec['orig_name']})"
 options = list(st.session_state["dsc_files"].keys())
 selected_key = st.selectbox("Choose a file", options=options, format_func=(file_label if options else None))
 dsc_type = st.selectbox("Type", options=["Type III", "Type II", "Type I"], index=0)
@@ -365,64 +378,58 @@ if selected_key:
     raw = st.session_state["dsc_files"][selected_key]["bytes"].decode("utf-8", "ignore")
     meta, df = parse_header_and_data(raw)
 
-    # split + HR
-    H1, C, H2 = run_split(df)
-    hr_calc_candidates = [r for seg in [H1, H2] if (r := calc_heating_rate(seg)) and r > 0]
-    hr_calc = float(np.median(hr_calc_candidates)) if hr_calc_candidates else calc_heating_rate(df)
+    # segment and β
+    H1, C, H2 = robust_segments(df)
+    beta_hdr_or_est = meta.get("heating_rate_header") or slope_beta_C_per_min(df)
 
-    # top metrics
+    # ---- header cards ----
     m1, m2, m3 = st.columns(3)
     m1.metric("Sample Mass (mg)", f"{meta.get('sample_mass_mg') if meta.get('sample_mass_mg') is not None else '—'}")
-    hr_show = meta.get("heating_rate_header")
-    m2.metric("Heating Rate (°C/min)", f"{(hr_show if hr_show is not None else (round(hr_calc, 2) if hr_calc else '—'))}")
+    m2.metric("Heating Rate (°C/min)", f"{clean_num(beta_hdr_or_est) if beta_hdr_or_est else '—'}")
     m3.metric("Operator", meta.get("operator") or "—")
-    if meta.get("heating_rate_header") and hr_calc:
-        if abs(hr_calc - meta["heating_rate_header"]) / max(meta["heating_rate_header"], 1e-6) > 0.10:
-            st.warning(f"Header HR={meta['heating_rate_header']:.2f} °C/min, Calculated HR={hr_calc:.2f} °C/min (check program).")
 
-    # Raw data (display mW) + download
+    # ---- raw table (display mW) ----
     st.subheader("Raw Data")
-    df_disp = pd.DataFrame({
-        "Time (min)": df["Time"],
-        "Temperature (°C)": df["Temp"],
-        "Heat Flow (mW)": df["HeatFlow"]  # assuming raw is mW from instrument export
-    })
+    # display HF as mW; if data is already W/g we convert to mW using sample mass if available
+    if meta.get("sample_mass_mg"):
+        _, Y_Wpg_all, to_mW = make_W_per_g_arrays(df, meta["sample_mass_mg"])
+        if Y_Wpg_all is not None:
+            HF_mW_display = to_mW(Y_Wpg_all)
+        else:
+            HF_mW_display = df["HeatFlow"].to_numpy()
+    else:
+        HF_mW_display = df["HeatFlow"].to_numpy()
+    df_disp = pd.DataFrame({"Time (min)": df["Time"], "Temperature (°C)": df["Temp"], "Heat Flow (mW)": HF_mW_display})
     st.dataframe(df_disp, use_container_width=True, height=300)
     st.download_button("⬇️ Download raw data (CSV)", df_disp.to_csv(index=False).encode("utf-8"),
                        file_name=f"{(meta.get('sample_name') or 'sample')}_raw.csv", mime="text/csv")
 
-    # Plot (white background), y in mW
+    # ---- plot (white background) ----
     st.subheader("DSC Curve with Analysis")
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df["Temp"], y=df["HeatFlow"],
-        mode="lines", name="DSC",
-        line=dict(width=3, color="#2563EB"),
-        hovertemplate="T = %{x:.2f} °C<br>HF = %{y:.2f} mW<extra></extra>",
-    ))
-    fig.update_layout(
-        xaxis_title="Temperature (°C)", yaxis_title="Heat Flow (mW)",
-        legend_title="",
-        plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF",
-        xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
-        yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
-        margin=dict(l=40, r=20, t=10, b=40),
-    )
+    fig.add_trace(go.Scatter(x=df["Temp"], y=HF_mW_display, mode="lines", name="DSC",
+                             line=dict(width=3, color="#2563EB"),
+                             hovertemplate="T=%{x:.2f} °C<br>HF=%{y:.2f} mW<extra></extra>"))
+    fig.update_layout(xaxis_title="Temperature (°C)", yaxis_title="Heat Flow (mW)",
+                      legend_title="", plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF",
+                      xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
+                      yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
+                      margin=dict(l=40, r=20, t=10, b=40))
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "toImageButtonOptions": {"format": "png"}})
 
-    # Results — strict Type III with proper units
+    # ---- results ----
     st.subheader("Calculated Results (Type III)")
-    results, beta_C_per_s = compute_typeIII_strict(meta, df, H1, C, H2, material, dh0, polymer_frac, hr_calc)
+    results, betas_info = compute_typeIII(meta, df, H1, C, H2, material, dh0, polymer_frac, beta_hdr_or_est)
     st.dataframe(pd.DataFrame(results, index=["Result"]), use_container_width=True)
 
-    # short summary
+    # summary line
     order = ["Tg (°C)", "Tm (°C)", "Tc (°C)", "ΔHm (J/g)", "ΔHcc (J/g)", "ΔHc (J/g)", "Crystallinity Xc (%)"]
     items = [f"{k.replace(' (°C)','').replace(' (J/g)','')} = {results[k]}" for k in order if results.get(k) is not None]
-    st.info(";  ".join(items) if items else "No calculable result (missing segment or ranges).")
+    st.info(";  ".join(items) if items else "No calculable result in the default ranges.")
     st.caption(
-        f"β = {(meta.get('heating_rate_header') or hr_calc or 0):.2f} °C/min "
-        f"({(beta_C_per_s or 0):.4f} °C/s).  ΔH°={dh0:.1f} J/g; polymer fraction={polymer_frac:.2f}.  "
-        "Tm/ΔHm from 2nd heating; Tc/ΔHc from cooling; ΔHcc from 1st heating. mW→W→W/g and division by β applied."
+        f"β(H1/C/H2) = {betas_info['β_H1']} / {betas_info['β_C']} / {betas_info['β_H2']} °C/min. "
+        f"ΔH°={dh0:.1f} J/g; polymer fraction={polymer_frac:.2f}.  "
+        "Computation: auto unit detection → W/g, baseline-corrected ∫(dT)/β."
     )
 else:
     st.info("Select a file to analyze.")
