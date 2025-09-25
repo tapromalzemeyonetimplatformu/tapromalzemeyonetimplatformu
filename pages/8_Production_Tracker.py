@@ -11,14 +11,54 @@ import pandas as pd
 APP_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_PATH = os.path.join(APP_DATA_DIR, "production_tracker.db")
 
+def _as_str(x):
+    """Return a clean string for potential username-like values."""
+    if x is None:
+        return ""
+    if isinstance(x, (list, tuple, set)):
+        return " ".join(map(str, x)).strip()
+    if isinstance(x, dict):
+        # common auth dict shapes
+        for k in ("username", "name", "display_name", "email", "user", "id"):
+            if k in x and str(x[k]).strip():
+                return str(x[k]).strip()
+        return ""
+    return str(x).strip()
+
 def current_username() -> str:
-    # App-wide auth may store username in different keys; try common ones
-    return (
-        st.session_state.get("username")
-        or st.session_state.get("current_user")
-        or st.session_state.get("user")
-        or "unknown"
-    )
+    """
+    Try common session_state keys used by Streamlit auth patterns.
+    Falls back from display name to username to email; never returns 'unknown'
+    if a plausible value exists.
+    """
+    cand_keys = [
+        "name",                 # streamlit-authenticator display name
+        "username",             # streamlit-authenticator username
+        "user",                 # generic
+        "current_user",         # custom apps
+        "auth_username",        # custom
+        "user_name",            # occasional variant
+        "profile",              # might be a dict
+        "account",              # might be a dict
+        "email",                # sometimes used as id
+    ]
+    candidates = []
+    for k in cand_keys:
+        if k in st.session_state:
+            candidates.append(_as_str(st.session_state.get(k)))
+
+    # Also inspect nested dicts if present under common containers
+    nested_sources = [st.session_state.get("auth"), st.session_state.get("user_info")]
+    for src in nested_sources:
+        s = _as_str(src)
+        if s:
+            candidates.append(s)
+
+    for c in candidates:
+        if c:  # first non-empty
+            return c
+
+    return "unknown"
 
 def get_conn():
     os.makedirs(APP_DATA_DIR, exist_ok=True)
@@ -257,7 +297,7 @@ else:
                 st.markdown(f"**Technology:** {row['Technology']}")
             with top_cols[4]:
                 st.markdown(f"**Sample Count:** {row['Sample Count']}")
-                st.markdown(f"**Uploader:** {row['Uploader']}")
+                st.markdown(f"**Uploader:** {row['Uploader'] if row['Uploader'] != 'unknown' else '-'}")
             with top_cols[5]:
                 st.markdown(f"**Created At (UTC):** {row['Created At (UTC)']}")
             with top_cols[6]:
@@ -274,4 +314,3 @@ else:
             st.code(str(row["Tests Planned/Done"]).strip() or "-", language="markdown")
             st.markdown("**Process Parameters**")
             st.code(str(row["Process Parameters"]).strip() or "-", language="markdown")
-
