@@ -6,6 +6,7 @@ from datetime import datetime
 import base64
 import re
 import requests
+import xml.etree.ElementTree as ET
 
 # =========================
 #  AUTH & PAGE METADATA
@@ -142,6 +143,7 @@ def display_uploaded_files():
 
 # =========================
 #  OPTION 2 (SEARCH ENGINE)
+#  Providers: OpenAlex, arXiv, DOAJ
 # =========================
 def _safe_join_authors(authorships):
     if not authorships:
@@ -157,8 +159,24 @@ def _safe_join_authors(authorships):
             names.append(nm)
     return names
 
+def _first_nonempty(*vals):
+    for v in vals:
+        if v:
+            return v
+    return None
+
+def _dedupe_results(rows):
+    seen = set()
+    uniq = []
+    for r in rows:
+        key = r.get("doi") or r.get("url") or (r.get("title","").lower() + "|" + (str(r.get("year")) if r.get("year") else ""))
+        if key and key not in seen:
+            seen.add(key)
+            uniq.append(r)
+    return uniq
+
+# ---------- OpenAlex ----------
 def _abstract_from_openalex(inv_index: dict):
-    # reconstruct abstract from inverted index (OpenAlex)
     try:
         positions = []
         for word, idxs in inv_index.items():
@@ -172,23 +190,6 @@ def _abstract_from_openalex(inv_index: dict):
     except Exception:
         return ""
 
-def _first_nonempty(*vals):
-    for v in vals:
-        if v:
-            return v
-    return None
-
-def _dedupe_results(rows):
-    seen = set()
-    uniq = []
-    for r in rows:
-        key = r.get("doi") or r.get("url") or r.get("title","").lower()
-        if key and key not in seen:
-            seen.add(key)
-            uniq.append(r)
-    return uniq
-
-# ---- Providers ----
 def search_openalex(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, per_page=20):
     base = "https://api.openalex.org/works"
     params = {"search": query, "per_page": per_page, "sort": "relevance_score:desc"}
@@ -246,78 +247,182 @@ def search_openalex(query: str, year_from: int|None, year_to: int|None, oa_only:
         })
     return results
 
-def search_crossref(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, rows=20):
-    base = "https://api.crossref.org/works"
-    params = {
-        "query": query,
-        "rows": rows,
-        "sort": "score",
-        "order": "desc"
-    }
-    filters = []
-    if year_from:
-        filters.append(f"from-pub-date:{year_from}-01-01")
-    if year_to:
-        # ✅ Crossref doğru parametre: until-pub-date
-        filters.append(f"until-pub-date:{year_to}-12-31")
-    if doc_type and doc_type != "any":
-        filters.append(f"type:{doc_type}")
-    if filters:
-        params["filter"] = ",".join(filters)
+# ---------- arXiv (Atom feed) ----------
+def _text(node):
+    return (node.text or "").strip() if node is not None else ""
 
+def _find(node, tag, ns):
+    return node.find(tag, ns)
+
+def _findall(node, tag, ns):
+    return node.findall(tag, ns)
+
+def search_arxiv(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, max_results=25):
+    # arXiv query language: AND with +
+    q = query.replace(" ", "+")
+    url = f"https://export.arxiv.org/api/query?search_query=all:{q}&start=0&max_results={max_results}&sortBy=relevance&sortOrder=descending"
     try:
-        r = requests.get(
-            base,
-            params=params,
-            timeout=15,
-            headers={"User-Agent": "COMPADDITIVE/1.0 (mailto:contact@example.com)"}
-        )
+        r = requests.get(url, timeout=15, headers={"User-Agent": "COMPADDITIVE/1.0"})
+        r.raise_for_status()
+        xml = r.text
+    except Exception as e:
+        st.warning(f"arXiv request failed: {e}")
+        return []
+
+    # Parse Atom
+    ns = {
+        "atom": "http://www.w3.org/2005/Atom",
+        "arxiv": "http://arxiv.org/schemas/atom"
+    }
+    try:
+        root = ET.fromstring(xml)
+    except Exception as e:
+        st.warning(f"arXiv parse error: {e}")
+        return []
+
+    rows = []
+    for entry in _findall(root, "atom:entry", ns):
+        title = _text(_find(entry, "atom:title", ns))
+        summary = _text(_find(entry, "atom:summary", ns))
+        published = _text(_find(entry, "atom:published", ns))  # e.g., 2024-06-15T...
+        year = None
+        if published:
+            try:
+                year = int(published[:4])
+            except:
+                year = None
+
+        # Authors
+        authors = []
+        for a in _findall(entry, "atom:author", ns):
+            nm = _text(_find(a, "atom:name", ns))
+            if nm:
+                authors.append(nm)
+
+        # Links
+        url_pdf = None
+        url_abs = None
+        for lk in _findall(entry, "atom:link", ns):
+            rel = lk.attrib.get("rel", "")
+            href = lk.attrib.get("href", "")
+            t = lk.attrib.get("type", "")
+            if t == "application/pdf":
+                url_pdf = href
+            if rel == "alternate":
+                url_abs = href
+        final_url = url_pdf or url_abs
+
+        # DOI (optional)
+        doi = None
+        doi_node = _find(entry, "arxiv:doi", ns)
+        if doi_node is not None and _text(doi_node):
+            doi = _text(doi_node)
+
+        item = {
+            "provider": "arXiv",
+            "id": _text(_find(entry, "atom:id", ns)),
+            "title": title or "(no title)",
+            "authors": authors,
+            "year": year,
+            "source": "arXiv",
+            "doi": doi,
+            "url": final_url or _text(_find(entry, "atom:id", ns)),
+            "abstract": summary
+        }
+        rows.append(item)
+
+    # Client-side filters (arXiv feed tarih filtresi kısıtlı)
+    if year_from:
+        rows = [x for x in rows if x["year"] and x["year"] >= year_from]
+    if year_to:
+        rows = [x for x in rows if x["year"] and x["year"] <= year_to]
+
+    # OA: arXiv zaten OA; doc_type yok sayılır.
+    return rows
+
+# ---------- DOAJ (JSON API v2) ----------
+def search_doaj(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, page_size=25):
+    # Basit arama (q=), client-side yıl filtresi
+    # API: https://doaj.org/api/v2/docs#tag/Search
+    url = "https://doaj.org/api/v2/search/articles/" + requests.utils.quote(query)
+    params = {"pageSize": page_size}
+    try:
+        r = requests.get(url, params=params, timeout=15, headers={"User-Agent": "COMPADDITIVE/1.0"})
         r.raise_for_status()
         data = r.json()
     except Exception as e:
-        st.warning(f"Crossref request failed: {e}")
+        st.warning(f"DOAJ request failed: {e}")
         return []
 
-    results = []
-    for item in data.get("message", {}).get("items", []):
-        title = (item.get("title") or ["(no title)"])[0]
+    rows = []
+    for rec in data.get("results", []):
+        bj = rec.get("bibjson", {}) or {}
+        title = bj.get("title") or "(no title)"
         year = None
-        if item.get("issued", {}).get("date-parts"):
-            year = item["issued"]["date-parts"][0][0]
+        # Yıl için history ya da year alanı olabilir
+        try:
+            year = int(bj.get("year")) if bj.get("year") else None
+        except:
+            year = None
+
+        # Authors
         authors = []
-        for a in item.get("author", []) or []:
-            nm = " ".join([x for x in [a.get("given"), a.get("family")] if x])
+        for a in bj.get("author", []) or []:
+            nm = a.get("name") or ""
             if nm:
                 authors.append(nm)
-        doi = item.get("DOI")
-        url = item.get("URL")
-        container = item.get("container-title", [])
-        venue = container[0] if container else None
-        abstract = item.get("abstract")
-        if abstract:
-            abstract = re.sub("<.*?>", "", abstract).strip()
 
-        results.append({
-            "provider": "Crossref",
-            "id": f"doi:{doi}" if doi else url,
+        # Links
+        url_link = None
+        for ln in bj.get("link", []) or []:
+            if ln.get("url"):
+                url_link = ln["url"]
+                break
+
+        # Source / Journal
+        source = None
+        if bj.get("journal", {}):
+            source = bj["journal"].get("title")
+
+        doi = None
+        for idt in bj.get("identifier", []) or []:
+            if idt.get("type") == "doi":
+                doi = idt.get("id")
+
+        abstract = bj.get("abstract", "")
+
+        rows.append({
+            "provider": "DOAJ",
+            "id": rec.get("id"),
             "title": title,
             "authors": authors,
             "year": year,
-            "source": venue,
+            "source": source,
             "doi": doi,
-            "url": url,
-            "abstract": abstract or ""
+            "url": url_link,
+            "abstract": abstract
         })
-    return results
 
+    # Client-side filters (OA: DOAJ zaten OA)
+    if year_from:
+        rows = [x for x in rows if x["year"] and x["year"] >= year_from]
+    if year_to:
+        rows = [x for x in rows if x["year"] and x["year"] <= year_to]
+
+    return rows
+
+# ---------- Unified search ----------
 def unified_search(query, year_from, year_to, oa_only, doc_type, providers):
     rows = []
     if "OpenAlex" in providers:
         rows += search_openalex(query, year_from, year_to, oa_only, doc_type)
-    if "Crossref" in providers:
-        rows += search_crossref(query, year_from, year_to, oa_only, doc_type)
+    if "arXiv" in providers:
+        rows += search_arxiv(query, year_from, year_to, oa_only, doc_type)
+    if "DOAJ" in providers:
+        rows += search_doaj(query, year_from, year_to, oa_only, doc_type)
 
     rows = _dedupe_results(rows)
+    # Basit sıralama: yeni → eski, başlığı olmayan sona
     rows.sort(key=lambda r: (-(r.get("year") or 0), r.get("title") is None))
     return rows
 
@@ -354,13 +459,14 @@ def add_to_shared_list(item, rationale, tags, priority, status):
     return True
 
 # =========================
-#  UI RENDER
+#  UI RENDER (Option 2)
 # =========================
 def render_search_ui():
     st.subheader("🧠 Literature search with AI")
 
     with st.form("lr_search_form", clear_on_submit=False):
-        query = st.text_input("Enter topic or keywords", key="lr_query", placeholder="e.g., PEEK FFF interlayer adhesion; PEKK crystallization kinetics")
+        query = st.text_input("Enter topic or keywords", key="lr_query",
+                              placeholder="e.g., PEEK FFF interlayer adhesion; PEKK crystallization kinetics")
         c1, c2, c3, c4 = st.columns([1,1,1,1])
 
         with c1:
@@ -370,9 +476,10 @@ def render_search_ui():
         with c3:
             oa_only = st.checkbox("Open access only", value=False)
         with c4:
+            # Tip filtreleri şimdilik yalnız OpenAlex'te etkili
             doc_type = st.selectbox("Type", ["any", "journal-article", "proceedings-article", "book-chapter", "posted-content"], index=0)
 
-        providers = st.multiselect("Providers", ["OpenAlex", "Crossref"], default=["OpenAlex", "Crossref"])
+        providers = st.multiselect("Providers", ["OpenAlex", "arXiv", "DOAJ"], default=["OpenAlex", "arXiv", "DOAJ"])
         submitted = st.form_submit_button("Search")
 
     if not st.session_state.get("lr_results"):
@@ -435,7 +542,7 @@ def render_search_ui():
     if not saved_items["items"]:
         st.info("No entries in the shared list yet.")
     else:
-        # small filters
+        # küçük filtreler
         f1, f2, f3 = st.columns([1,1,1])
         with f1:
             flt_user = st.text_input("Filter by user", key="flt_user")
