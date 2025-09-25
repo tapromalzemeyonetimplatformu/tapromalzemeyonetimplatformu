@@ -1,5 +1,17 @@
-# 5_DSC_Library.py — DSC Library (auth + pre-naming + add-to-library + units in table)
-import io, re, math, uuid
+# 5_DSC_Library.py — DSC Library
+# Features:
+# - Auth guard (requires a logged-in session)
+# - Upload → Stage (form) → Pre-name → Add to Library (dedup with MD5)
+# - Library table (Original, User Name, Uploader, Time, Delete)
+# - Clean select list (User Name (Original))
+# - Correct heating-rate read (header) + robust fallback (regression on H1/H2)
+# - Raw Data table with units + CSV download
+# - Single clean DSC curve (download from Plotly modebar)
+# - Type III one-block results: Tg, Tm, Tc, ΔHm, ΔHcc, ΔHc, Xc
+# - Endotherm direction auto-detect; linear-baseline integration
+# - ΔH° and polymer mass fraction adjustable
+
+import io, re, math, uuid, hashlib
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -44,7 +56,8 @@ HEADER_KEYS = {
 # ---------------- Helpers --------------------
 def parse_header_and_data(text: str):
     lines = text.splitlines()
-    # ilk sayısal satırı bul
+
+    # first numeric line = data start
     num_re = re.compile(r'^\s*[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?')
     start = None
     for i, l in enumerate(lines):
@@ -55,7 +68,7 @@ def parse_header_and_data(text: str):
     header = lines[:start] if start is not None else []
     data_str = "\n".join(lines[start:]) if start is not None else ""
 
-    # header yakalama
+    # header capture
     H = {}
     for k, keys in HEADER_KEYS.items():
         for key in keys:
@@ -77,7 +90,7 @@ def parse_header_and_data(text: str):
                 sample_mass_mg = float(m.group(1))
                 break
 
-    # heating rate (header) — "Ramp X.XX C/min"
+    # heating rate from header: "Ramp X.XX C/min"
     heating_rate_header = None
     for ln in header:
         if any(ln.strip().startswith(kw) for kw in HEADER_KEYS["orgmethod"]):
@@ -86,7 +99,7 @@ def parse_header_and_data(text: str):
                 heating_rate_header = float(m.group(1))
                 break
 
-    # veri: beklenen 3+ kolon (Time, Temp, HeatFlow, …)
+    # data parse (expect ≥3 cols: Time, Temp, HeatFlow)
     if data_str.strip():
         df = pd.read_csv(io.StringIO(data_str), delim_whitespace=True, header=None, engine="python")
         if df.shape[1] >= 3:
@@ -109,14 +122,17 @@ def parse_header_and_data(text: str):
     return meta, df[["Time", "Temp", "HeatFlow"]].copy()
 
 def run_split(df: pd.DataFrame):
-    """Isı çevrimlerini ayır: H1 → C → H2 (dayanıklı)."""
+    """Split into Heating1 → Cooling → Heating2 (robust)."""
     if df.empty or len(df) < 50:
         return df.copy(), pd.DataFrame(), pd.DataFrame()
     T = df["Temp"].to_numpy()
     dT = np.diff(T, prepend=T[0])
+
     from scipy.ndimage import uniform_filter1d
     dTs = uniform_filter1d(dT, size=41, mode="nearest")
     sign = np.sign(dTs)
+
+    # run-length blocks
     blocks, start = [], 0
     for i in range(1, len(sign)):
         if sign[i] != sign[i - 1]:
@@ -125,17 +141,21 @@ def run_split(df: pd.DataFrame):
             start = i
     if len(sign) - start > 30:
         blocks.append((start, len(sign)))
+
     heats = [(a, b) for (a, b) in blocks if np.mean(dTs[a:b]) >= 0]
     cools = [(a, b) for (a, b) in blocks if np.mean(dTs[a:b]) < 0]
+
     H1 = heats[0] if heats else None
-    C = next(((a, b) for (a, b) in cools if H1 and a > H1[1]), None)
+    C  = next(((a, b) for (a, b) in cools if H1 and a > H1[1]), None)
     H2 = next(((a, b) for (a, b) in heats if C and a > C[1]), None)
+
     def slice_blk(blk):
-        return df.iloc[blk[0] : blk[1]].reset_index(drop=True) if blk else pd.DataFrame(columns=df.columns)
+        return df.iloc[blk[0]:blk[1]].reset_index(drop=True) if blk else pd.DataFrame(columns=df.columns)
+
     return slice_blk(H1), slice_blk(C), slice_blk(H2)
 
 def calc_heating_rate(df):
-    """Zamana göre sıcaklık eğiminden (°C/min) hesapla (regresyon)."""
+    """Compute °C/min by linear regression (robust)."""
     if df.empty or len(df) < 10:
         return None
     t = df["Time"].to_numpy()
@@ -143,9 +163,10 @@ def calc_heating_rate(df):
     q10, q90 = np.quantile(np.arange(len(T)), [0.1, 0.9]).astype(int)
     if q90 <= q10:
         return None
-    tt = t[q10:q90]; TT = T[q10:q90]
+    tt = t[q10:q90]
+    TT = T[q10:q90]
     A = np.vstack([tt, np.ones_like(tt)]).T
-    m, _ = np.linalg.lstsq(A, TT, rcond=None)[0]  # °C per time_unit (genelde dakika)
+    m, _ = np.linalg.lstsq(A, TT, rcond=None)[0]  # °C per time_unit (TA export usually minutes)
     return float(m)
 
 def baseline_area(T, Y, a, b):
@@ -196,7 +217,8 @@ def compute_typeIII(df_all, H1, C, H2, material, dh0, polymer_frac):
     Tg = Tm = Tc = np.nan
     dHm = dHc = np.nan
     dHcc = 0.0
-    # Tg, Tm, ΔHm → 2. ısıtma tercih
+
+    # Tg, Tm, ΔHm → 2nd heating preferred
     if not H2.empty:
         T2 = H2["Temp"].to_numpy(); Y2 = H2["HeatFlow"].to_numpy()
         Tg = tg_inflection(T2, Y2, *R["tg"])
@@ -209,18 +231,23 @@ def compute_typeIII(df_all, H1, C, H2, material, dh0, polymer_frac):
         hm_down = endotherm_is_down(T, Y, *R["hm"])
         Tm = peak_in_window(T, Y, *R["hm"], mode=("min" if hm_down else "max"))
         dHm = abs(baseline_area(T, Y, *R["hm"]))
-    # Tc, ΔHc → soğuma
+
+    # Tc, ΔHc → cooling
     if not C.empty:
         Tc = peak_in_window(C["Temp"].to_numpy(), C["HeatFlow"].to_numpy(), *R["hc"], mode="min")
         dHc = baseline_area(C["Temp"].to_numpy(), C["HeatFlow"].to_numpy(), *R["hc"])
-    # ΔHcc → 1. ısıtma (varsa)
+
+    # ΔHcc → 1st heating (if present)
     if not H1.empty and all(v is not None for v in R["hcc"]):
         dHcc = abs(baseline_area(H1["Temp"].to_numpy(), H1["HeatFlow"].to_numpy(), *R["hcc"]))
+
     corr = dHm - dHcc
     denom = dh0 * max(polymer_frac, 1e-6)
     Xc = (corr / denom) * 100.0 if denom > 0 else np.nan
+
     def clean(x):
         return None if (x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x)))) else round(float(x), 2)
+
     return {
         "Tg (°C)": clean(Tg),
         "Tm (°C)": clean(Tm),
@@ -236,31 +263,57 @@ def compute_typeIII(df_all, H1, C, H2, material, dh0, polymer_frac):
 st.title("DSC Library")
 
 if "dsc_files" not in st.session_state:
-    st.session_state["dsc_files"] = {}  # Library: key -> {orig_name,user_name,uploader,uploaded_at,bytes}
+    st.session_state["dsc_files"] = {}   # Library: key -> {orig_name,user_name,uploader,uploaded_at,bytes}
 if "pending_uploads" not in st.session_state:
-    st.session_state["pending_uploads"] = []  # list of {tmp_key, orig_name, bytes, user_name}
+    st.session_state["pending_uploads"] = []  # staged before adding to library
+if "seen_upload_ids" not in st.session_state:
+    st.session_state["seen_upload_ids"] = set()  # MD5 dedup for staged files
 
-# ---------------- Upload ---------------------
+# ---------------- Upload (Form + Submit + Dedup) ---------------------
 st.header("Upload")
-new_files = st.file_uploader("Upload DSC .txt files", type=["txt"], accept_multiple_files=True)
-if new_files:
-    # pending aşamasına at — önce isim verilecek, sonra Add to Library
+
+with st.form("uploader_form"):
+    new_files = st.file_uploader(
+        "Upload DSC .txt files",
+        type=["txt"],
+        accept_multiple_files=True,
+        key="dsc_uploader"
+    )
+    staged = st.form_submit_button("Stage files")
+
+if staged and new_files:
+    added = 0
     for f in new_files:
+        content = f.getvalue()
+        fid = hashlib.md5(content + f.name.encode("utf-8")).hexdigest()
+        if fid in st.session_state["seen_upload_ids"]:
+            continue  # already staged → skip
+        st.session_state["seen_upload_ids"].add(fid)
         st.session_state["pending_uploads"].append({
             "tmp_key": uuid.uuid4().hex,
+            "file_id": fid,
             "orig_name": f.name,
-            "bytes": f.getvalue(),
-            "user_name": f.name  # öneri
+            "bytes": content,
+            "user_name": f.name  # default editable display name
         })
+        added += 1
+    if added:
+        st.success(f"{added} file(s) staged. Name them below, then add to library.")
+    # clear uploader widget & rerun to prevent re-staging on every rerun
+    st.session_state.pop("dsc_uploader", None)
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
 
 # ----------- Pre-naming & Add to Library -----
 if st.session_state["pending_uploads"]:
     st.subheader("Name your upload(s)")
-    remove_keys = []
-    cols = st.columns([4, 3])
-    with cols[0]:
-        st.caption("Give a user-friendly name, then add it to your library.")
-    with cols[1]:
+
+    top_l, top_r = st.columns([4, 3])
+    with top_l:
+        st.caption("Give a user-friendly name, then add to your library.")
+    with top_r:
         if st.button("Add ALL to Library"):
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for item in st.session_state["pending_uploads"]:
@@ -272,10 +325,15 @@ if st.session_state["pending_uploads"]:
                     "uploaded_at": now,
                     "bytes": item["bytes"],
                 }
+                st.session_state["seen_upload_ids"].discard(item.get("file_id", ""))
             st.session_state["pending_uploads"].clear()
             st.success("All files added to library.")
-            st.rerun()
-    # tek tek ekleme
+            try:
+                st.rerun()
+            except Exception:
+                st.experimental_rerun()
+
+    remove_keys = []
     for item in st.session_state["pending_uploads"]:
         c1, c2, c3 = st.columns([4, 4, 1])
         c1.write(item["orig_name"])
@@ -291,11 +349,15 @@ if st.session_state["pending_uploads"]:
                 "uploaded_at": now,
                 "bytes": item["bytes"],
             }
+            st.session_state["seen_upload_ids"].discard(item.get("file_id", ""))
             remove_keys.append(item["tmp_key"])
     if remove_keys:
         st.session_state["pending_uploads"] = [x for x in st.session_state["pending_uploads"] if x["tmp_key"] not in remove_keys]
         st.success("Added to library.")
-        st.rerun()
+        try:
+            st.rerun()
+        except Exception:
+            st.experimental_rerun()
 
 # ---------------- Uploaded List --------------
 st.header("Uploaded DSC Files")
@@ -317,9 +379,11 @@ else:
 
 # ---------------- Selection ------------------
 st.header("Select a file to analyze")
+
 def file_label(key: str) -> str:
     rec = st.session_state["dsc_files"][key]
     return f"{rec['user_name']} ({rec['orig_name']})"
+
 options = list(st.session_state["dsc_files"].keys())
 selected_key = st.selectbox("Choose a file", options=options, format_func=(file_label if options else None))
 dsc_type = st.selectbox("Type", options=["Type III", "Type II", "Type I"], index=0)
@@ -335,7 +399,7 @@ if selected_key:
     raw = st.session_state["dsc_files"][selected_key]["bytes"].decode("utf-8", "ignore")
     meta, df = parse_header_and_data(raw)
 
-    # çevrimleri ayır ve heating rate doğrulama
+    # segment split + heating rate validation
     H1, C, H2 = run_split(df)
     hr_calc_candidates = []
     for seg in [H1, H2]:
@@ -344,7 +408,7 @@ if selected_key:
             hr_calc_candidates.append(r)
     hr_calc = float(np.median(hr_calc_candidates)) if hr_calc_candidates else calc_heating_rate(df)
 
-    # üst metrikler
+    # top metrics
     st.subheader("")
     m1, m2, m3 = st.columns(3)
     m1.metric("Sample Mass (mg)", f"{meta.get('sample_mass_mg') if meta.get('sample_mass_mg') is not None else '—'}")
@@ -352,11 +416,12 @@ if selected_key:
     m2.metric("Heating Rate (°C/min)", f"{(hr_show if hr_show is not None else (round(hr_calc, 2) if hr_calc else '—'))}")
     m3.metric("Operator", meta.get("operator") or "—")
 
+    # mismatch warning
     if meta.get("heating_rate_header") and hr_calc:
         if abs(hr_calc - meta["heating_rate_header"]) / max(meta["heating_rate_header"], 1e-6) > 0.10:
             st.warning(f"Header HR={meta['heating_rate_header']:.2f} °C/min, Calculated HR={hr_calc:.2f} °C/min (check program).")
 
-    # Raw data + indirme (BİRİMLİ BAŞLIKLAR)
+    # Raw data (with units) + download
     st.subheader("Raw Data")
     df_disp = df.rename(columns={"Time": "Time (min)", "Temp": "Temperature (°C)", "HeatFlow": "Heat Flow (W/g)"})
     st.dataframe(df_disp, use_container_width=True, height=300)
@@ -367,18 +432,20 @@ if selected_key:
         mime="text/csv",
     )
 
-    # Grafik (tek eğri, indirilebilir)
+    # DSC curve (single, downloadable via modebar)
     st.subheader("DSC Curve with Analysis")
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df["Temp"], y=df["HeatFlow"], mode="lines", name="DSC"))
     fig.update_layout(xaxis_title="Temperature (°C)", yaxis_title="Heat Flow (W/g)", legend_title="")
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "toImageButtonOptions": {"format": "png"}})
 
-    # Sonuçlar — tek blok (Type III)
+    # Results — single block (Type III logic)
     st.subheader("Calculated Results (Type III)")
     results = compute_typeIII(df, H1, C, H2, material, dh0, polymer_frac)
     show = {k: v for k, v in results.items() if not k.startswith("_")}
     st.dataframe(pd.DataFrame(show, index=["Result"]), use_container_width=True)
+
+    # short summary line
     order = ["Tg (°C)", "Tm (°C)", "Tc (°C)", "ΔHm (J/g)", "ΔHcc (J/g)", "ΔHc (J/g)", "Crystallinity Xc (%)"]
     items = []
     for k in order:
@@ -386,6 +453,6 @@ if selected_key:
             label = k.replace(" (°C)", "").replace(" (J/g)", "")
             items.append(f"{label} = {show[k]}")
     st.info(";  ".join(items) if items else "No calculable result in the default ranges.")
-    st.caption(f"{results.get('_note','')}  ΔH°={dh0:.1f} J/g; polymer fraction={polyer_frac if 'polyer_frac' in locals() else polymer_frac:.2f}.")
+    st.caption(f"{results.get('_note','')}  ΔH°={dh0:.1f} J/g; polymer fraction={polymer_frac:.2f}.")
 else:
     st.info("Select a file to analyze.")
