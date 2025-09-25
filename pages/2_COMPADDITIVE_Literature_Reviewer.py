@@ -1,4 +1,4 @@
-# ✅ COMPADDITIVE_Literature_Reviewer.py (3_COMPADDITIVE_Literature_Reviewer.py)
+# ✅ COMPADDITIVE_Literature_Reviewer.py
 import streamlit as st
 import os
 import json
@@ -10,7 +10,7 @@ import base64
 if "authenticated" not in st.session_state or not st.session_state.authenticated:
     st.error("🔒 You must be logged in to access this page.")
     st.stop()
-    
+
 st.set_page_config(page_title="COMPADDITIVE Literature Reviewer", layout="wide")
 st.title("COMPADDITIVE Literature Reviewer")
 
@@ -27,12 +27,16 @@ else:
 
 def save_metadata():
     with open(METADATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(uploaded_files, f, indent=4)
+        json.dump(uploaded_files, f, indent=4, ensure_ascii=False)
 
 def file_uploader():
     st.subheader("📤 Upload a new literature file")
 
-    uploaded_file = st.file_uploader("Upload file", type=["pdf", "jpg", "jpeg", "png", "xlsx", "xls", "csv", "docx", "pptx"], label_visibility="collapsed")
+    uploaded_file = st.file_uploader(
+        "Upload file",
+        type=["pdf", "jpg", "jpeg", "png", "xlsx", "xls", "csv", "docx", "pptx"],
+        label_visibility="collapsed"
+    )
     title = st.text_input("Enter a title for this file")
     description = st.text_area("Enter a description for this file")
 
@@ -55,6 +59,10 @@ def file_uploader():
 
 def display_uploaded_files():
     st.subheader("📁 Uploaded Files")
+    if not uploaded_files:
+        st.info("No files uploaded yet.")
+        return
+
     for i, file in enumerate(uploaded_files):
         col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([2, 2, 3, 2, 2, 1, 1, 1])
         col1.write(f"**Original:** {file['filename']}")
@@ -73,20 +81,25 @@ def display_uploaded_files():
             st.rerun()
 
         # Download button
-        with open(os.path.join(UPLOAD_DIR, file['filename']), "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
+        file_path = os.path.join(UPLOAD_DIR, file['filename'])
+        if os.path.exists(file_path):
+            with open(file_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
             href = f'<a href="data:file/octet-stream;base64,{b64}" download="{file["filename"]}">📥</a>'
             col7.markdown(href, unsafe_allow_html=True)
+        else:
+            col7.write("—")
 
         # Preview toggle button
         if col8.button("👁️", key=f"preview_{file['filename']}"):
-            st.session_state[f"show_preview_{file['filename']}"] = not st.session_state.get(f"show_preview_{file['filename']}", False)
+            st.session_state[f"show_preview_{file['filename']}"] = not st.session_state.get(
+                f"show_preview_{file['filename']}", False
+            )
 
         # Conditional preview section
         if st.session_state.get(f"show_preview_{file['filename']}", False):
             st.markdown(f"### 👁️ Preview: {file['title']}")
-            file_path = os.path.join(UPLOAD_DIR, file['filename'])
-            if file['filename'].lower().endswith((".png", ".jpg", ".jpeg")):
+            if file['filename'].lower().endswith((".png", ".jpg", ".jpeg")) and os.path.exists(file_path):
                 st.image(file_path, use_column_width=True)
             else:
                 st.markdown(
@@ -99,5 +112,19 @@ def display_uploaded_files():
                 )
             st.markdown("---")
 
-file_uploader()
-display_uploaded_files()
+# === Yeni: İlerleme Seçimi ===
+st.subheader("How would you like to proceed?")
+mode = st.radio(
+    label="Select a mode",
+    options=["Uploading existing literature files", "Literature search with AI"],
+    index=0,
+    horizontal=False
+)
+
+# === Seçime göre içerik ===
+if mode == "Uploading existing literature files":
+    file_uploader()
+    display_uploaded_files()
+else:
+    st.subheader("🧠 Literature search with AI")
+    st.info("This section will be developed soon. For now, please use the 'Uploading existing literature files' mode.")
