@@ -538,7 +538,7 @@ def render_search_ui():
                             st.rerun()
 
     st.markdown("---")
-    st.subheader("📚 Shared Reading List (visible to all users)")
+    st.subheader("📚 Saved Literature List")
     if not saved_items["items"]:
         st.info("No entries in the shared list yet.")
     else:
