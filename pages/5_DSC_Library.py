@@ -1,397 +1,344 @@
-# 5_DSC_Library.py  —  DSC Library (revised)
-# ⬇️ Kopyala-yapıştır çalışır. Upload/Files/Select/Type/Material/SampleMass/RawData/Download kısımları korunmuştur.
-# Değişiklikler:
-# - Heating Rate başlıktan doğru çekilir (OrgMethod: Ramp X.XX C/min).
-# - Grafik sade: yalnızca eğri, indirilebilir.
-# - Sonuçlar tek blok: Tg, Tm, ΔHm, ΔHcc, ΔHc, %Crystallinity (doğru çevrim kuralları ile).
-# - ΔH° varsayılanları: PEEK/PEKK=130 J/g; PPS=112 J/g (UI’dan override edilebilir).
-# - Filler düzeltmesi için polymer mass fraction input’u (vars. 1.00).
-
-import io, re, math
+# 5_DSC_Library.py — DSC Library (auth + user naming + robust analysis)
+import io, re, math, uuid
 from datetime import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-# --- Page config (ilk çağrı) ---
+# ---------- Page Config ----------
 st.set_page_config(page_title="DSC Library", page_icon="🔥", layout="wide")
 
-# -------------- Utilities --------------
+# ---------- Auth Guard ----------
+def require_auth():
+    auth = (
+        st.session_state.get("authenticated") or
+        (isinstance(st.session_state.get("auth"), dict) and st.session_state["auth"].get("is_authenticated")) or
+        bool(st.session_state.get("username")) or
+        bool(st.session_state.get("auth_user"))
+    )
+    if not auth:
+        st.error("Please log in to access DSC Library.")
+        st.stop()
+    # username çıkar
+    user = (
+        st.session_state.get("username") or
+        st.session_state.get("auth_user") or
+        (st.session_state.get("auth") or {}).get("user", {}).get("username") or
+        (st.session_state.get("auth") or {}).get("username") or
+        "unknown"
+    )
+    return str(user)
 
-HEADER_DECODING = {
-    "sample": ["Sample", "Sample Name"],
-    "size_mg": ["Size", "Sample mass", "Mass", "Weight"],
-    "pan_mass": ["PanMass", "Pan mass"],
+current_user = require_auth()
+
+# ---------- Constants ----------
+POLYMER_DH0_DEFAULTS = {"PEEK":130.0, "PEKK":130.0, "PPS":112.0}
+HEADER_KEYS = {
+    "sample": ["Sample","Sample Name"],
+    "size_mg": ["Size","Sample mass","Mass","Weight"],
+    "orgmethod": ["OrgMethod","Method","Program"],
     "operator": ["Operator"],
-    "instrument": ["Instrument"],
-    "orgmethod": ["OrgMethod", "Method", "Program"],
-    "file": ["File", "OrgFile"],
-    "mode": ["Mode"],
-    "language": ["Language"],
-    "run": ["Run"]
+    "file": ["File","OrgFile"],
 }
 
-POLYMER_DH0_DEFAULTS = {
-    # Varsayılan ΔH° [J/g] (100% kristal)
-    "PEEK": 130.0,   # literature common
-    "PEKK": 130.0,   # literature common
-    "PPS": 112.0     # common reported; editable in UI
-}
-
-def parse_header_and_data(txt: str):
-    """TA formatındaki .txt dosyadan header + tabloyu ayıkla."""
-    lines = txt.splitlines()
-    # Header sonu: ilk sayısal satır
-    num_re = re.compile(r'^\s*[-+]?(\d+\.?\d*|\.\d+)([Ee][-+]?\d+)?')
-    start_idx = None
-    for i, l in enumerate(lines):
+# ---------- Helpers ----------
+def parse_header_and_data(text:str):
+    lines = text.splitlines()
+    # ilk sayısal satırı bul
+    num_re = re.compile(r'^\s*[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?')
+    start = None
+    for i,l in enumerate(lines):
         if num_re.match(l.strip()):
-            start_idx = i
-            break
-    header = lines[:start_idx] if start_idx is not None else []
-    data_str = "\n".join(lines[start_idx:]) if start_idx is not None else ""
+            start = i; break
+    header = lines[:start] if start is not None else []
+    data_str = "\n".join(lines[start:]) if start is not None else ""
 
-    # Header alanlarını yakala
     H = {}
-    for k, keys in HEADER_DECODING.items():
+    for k, keys in HEADER_KEYS.items():
         for key in keys:
             for ln in header:
-                if ln.startswith(key + "\t") or ln.startswith(key + " "):
+                if ln.startswith(key+"\t") or ln.startswith(key+" "):
                     parts = re.split(r"\t|\s{2,}", ln.strip())
-                    if len(parts) >= 2:
-                        H[k] = parts[1]
-                        break
+                    if len(parts) >= 2: H[k]=parts[1]; break
             if k in H: break
 
-    # Sample mass (mg) — "Size\t3.35400\tmg" gibi
+    # sample mass (mg)
     sample_mass_mg = None
     for ln in header:
-        if any(ln.strip().startswith(kw) for kw in HEADER_DECODING["size_mg"]):
-            # satır içinde mg sayısını yakala
-            m = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*mg', ln)
-            if m:
-                sample_mass_mg = float(m.group(1))
-                break
+        if any(ln.strip().startswith(kw) for kw in HEADER_KEYS["size_mg"]):
+            m = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*mg', ln, flags=re.I)
+            if m: sample_mass_mg = float(m.group(1)); break
 
-    # Heating rate: OrgMethod satırlarında "Ramp 10.00 C/min ..."
-    heating_rate_c_min = None
-    org_lines = [ln for ln in header if any(ln.strip().startswith(kw) for kw in HEADER_DECODING["orgmethod"])]
-    # İlk "Ramp a to b" pozitif eğimli komut ısıtma hızıdır (C/min)
-    for ln in org_lines:
-        # ör: "OrgMethod 3: Ramp 10.00 C/min to 400.00 C"
-        m = re.search(r'Ramp\s+([0-9]+(?:\.[0-9]+)?)\s*C\s*/\s*min', ln, flags=re.I)
-        if m:
-            heating_rate_c_min = float(m.group(1))
-            break
+    # heating rate (header) — Ramp X C/min
+    heating_rate_header = None
+    for ln in header:
+        if any(ln.strip().startswith(kw) for kw in HEADER_KEYS["orgmethod"]):
+            m = re.search(r'Ramp\s+([0-9]+(?:\.[0-9]+)?)\s*C\s*/\s*min', ln, flags=re.I)
+            if m: heating_rate_header = float(m.group(1)); break
 
-    # Veri: 3 kolon (Time, Temp, HeatFlow) — whitespace ayrımlı
+    # veri: beklenen 3 kolon (Time, Temp, HeatFlow)
     if data_str.strip():
-        df = pd.read_csv(io.StringIO(data_str), delim_whitespace=True, header=None, names=["Time", "Temp", "HeatFlow"], engine="python")
+        df = pd.read_csv(io.StringIO(data_str), delim_whitespace=True, header=None, engine="python")
+        # 3+ kolon ise son iki kolonu Temp & HeatFlow olacak şekilde uyumla
+        if df.shape[1] >= 3:
+            cols = ["Time","Temp","HeatFlow"] + [f"c{i}" for i in range(3, df.shape[1])]
+            df.columns = cols[:df.shape[1]]
+            # bazı cihazlarda HeatFlow son kolonda olabilir → son kolonu kullan
+            if "HeatFlow" not in df.columns:
+                df["HeatFlow"] = df.iloc[:,-1]
+        else:
+            # emniyet
+            df = pd.DataFrame(columns=["Time","Temp","HeatFlow"])
     else:
         df = pd.DataFrame(columns=["Time","Temp","HeatFlow"])
 
     meta = {
-        "sample_name": H.get("sample", ""),
+        "sample_name": H.get("sample",""),
         "sample_mass_mg": sample_mass_mg,
-        "operator": H.get("operator", ""),
-        "instrument": H.get("instrument", ""),
-        "file": H.get("file", ""),
-        "heating_rate_c_min": heating_rate_c_min
+        "operator": H.get("operator",""),
+        "file": H.get("file",""),
+        "heating_rate_header": heating_rate_header
     }
-    return meta, df
+    return meta, df[["Time","Temp","HeatFlow"]].copy()
 
-def split_cycles(df: pd.DataFrame):
-    """
-    Sıcaklık trendine göre segmentleri ayır: Heating1 -> Cooling -> Heating2
-    """
-    if df.empty or len(df) < 20:
-        return df.copy(), pd.DataFrame(), pd.DataFrame()
-
+def run_split(df: pd.DataFrame):
+    """Isı çevrimlerini ayır: H1→C→H2. Dayanıklı & sade."""
+    if df.empty or len(df)<50: return df.copy(), pd.DataFrame(), pd.DataFrame()
     T = df["Temp"].to_numpy()
-    dT = np.gradient(T)
-    # Bölümleme: dT>0 heating, dT<0 cooling
-    # İlk pozitif uzun segment -> H1, sonra negatif -> C, sonra tekrar pozitif -> H2
-    sign = np.sign(dT)
-    # yumuşatma: tekil sapmaları bastır
+    dT = np.diff(T, prepend=T[0])
+    # küçük dalgalanmaları ayıkla
     from scipy.ndimage import uniform_filter1d
-    sign_s = uniform_filter1d(sign, size=51, mode='nearest')
-    idxs = np.arange(len(df))
-
-    # geçiş noktaları
-    trans = np.where(np.diff(np.signbit(sign_s)))[0] + 1
-    # Basit mantık: başı (+) ise H1 başlar; sonra (-) -> C; sonra (+) -> H2
-    # Aşırı bölünmeleri önlemek için en uzun üç bloğu seç
+    dTs = uniform_filter1d(dT, size=41, mode="nearest")
+    sign = np.sign(dTs)
+    # run-length ile bloklar
     blocks = []
-    last = 0
-    for t in list(trans) + [len(df)]:
-        blocks.append((last, t))
-        last = t
-    # Her blok için ortalama dT işareti
-    labeled = []
-    for a,b in blocks:
-        if b-a < 50: continue
-        s = np.sign(np.mean(dT[a:b]))
-        labeled.append((a,b,int(s)))
-    # (+) -> H, (-) -> C
-    heats = [blk for blk in labeled if blk[2] >= 0]
-    cools = [blk for blk in labeled if blk[2] < 0]
-    # H1 = ilk heat bloğu
+    start = 0
+    for i in range(1,len(sign)):
+        if sign[i] != sign[i-1]:
+            if i-start > 30: blocks.append((start, i))
+            start = i
+    if len(sign)-start > 30: blocks.append((start, len(sign)))
+
+    heats = [(a,b) for (a,b) in blocks if np.mean(dTs[a:b])>=0]
+    cools = [(a,b) for (a,b) in blocks if np.mean(dTs[a:b])<0]
+
     H1 = heats[0] if heats else None
-    # C = H1'den sonra gelen ilk cool
-    C = None
-    if H1:
-        for blk in cools:
-            if blk[0] > H1[1]:
-                C = blk
-                break
-    # H2 = C'den sonra gelen ilk heat
-    H2 = None
-    if C:
-        for blk in heats:
-            if blk[0] > C[1]:
-                H2 = blk
-                break
+    C  = next(((a,b) for (a,b) in cools if H1 and a>b), None)
+    H2 = next(((a,b) for (a,b) in heats if C  and a>b), None)
 
     def slice_blk(blk):
         return df.iloc[blk[0]:blk[1]].reset_index(drop=True) if blk else pd.DataFrame(columns=df.columns)
-
     return slice_blk(H1), slice_blk(C), slice_blk(H2)
 
-def linear_baseline_integral(T, Y, tmin, tmax):
-    """[J/g] için alan: Y=W/g, x=°C. Lineer baseline ile ∫(Y - baseline) dT."""
-    mask = (T>=tmin) & (T<=tmax)
-    if not np.any(mask):
-        return np.nan
-    Tseg = T[mask]; Yseg = Y[mask]
-    # Bas çizgi: uç noktalardan geçen doğru
-    y0 = Yseg[0]; y1 = Yseg[-1]
-    x0 = Tseg[0]; x1 = Tseg[-1]
-    baseline = y0 + (y1-y0)*(Tseg-x0)/(x1-x0+1e-12)
-    corr = Yseg - baseline
-    # Trapez
-    area = np.trapz(corr, Tseg)
-    return float(area)
+def calc_heating_rate(df):
+    """Zamana göre sıcaklık eğiminden (°C/min) hesapla."""
+    if df.empty or len(df)<10: return None
+    # Time biriminin dakika olduğu TA exportlarında genelde doğrudan dakikadır.
+    t = df["Time"].to_numpy()
+    T = df["Temp"].to_numpy()
+    # uçları at, lineer regresyon
+    q10, q90 = np.quantile(np.arange(len(T)), [0.1,0.9]).astype(int)
+    if q90<=q10: return None
+    tt = t[q10:q90]; TT = T[q10:q90]
+    # basit eğim
+    A = np.vstack([tt, np.ones_like(tt)]).T
+    m, _ = np.linalg.lstsq(A, TT, rcond=None)[0]
+    # m: °C / time_unit (genelde min)
+    return float(m)
 
-def peak_max(T, Y, tmin=None, tmax=None):
-    m = np.ones_like(T, dtype=bool)
-    if tmin is not None: m &= (T>=tmin)
-    if tmax is not None: m &= (T<=tmax)
+def baseline_area(T, Y, a, b):
+    m = (T>=a) & (T<=b)
     if not np.any(m): return np.nan
-    idx = np.nanargmax(Y[m])
-    # global index
-    idx_global = np.arange(len(Y))[m][idx]
-    return float(T[idx_global])
+    x = T[m]; y = Y[m]
+    y0, y1 = y[0], y[-1]
+    x0, x1 = x[0], x[-1]
+    base = y0 + (y1-y0)*(x-x0)/(x1-x0+1e-12)
+    return float(np.trapz(y-base, x))
 
-def peak_min(T, Y, tmin=None, tmax=None):
-    m = np.ones_like(T, dtype=bool)
-    if tmin is not None: m &= (T>=tmin)
-    if tmax is not None: m &= (T<=tmax)
+def peak_in_window(T, Y, a, b, mode="min"):
+    m = (T>=a) & (T<=b)
     if not np.any(m): return np.nan
-    idx = np.nanargmin(Y[m])
-    idx_global = np.arange(len(Y))[m][idx]
-    return float(T[idx_global])
+    if mode=="min":
+        idx = np.nanargmin(Y[m])
+    else:
+        idx = np.nanargmax(Y[m])
+    return float(T[m][idx])
 
-def tg_inflection(T, Y, tmin=None, tmax=None):
-    """Tg: inflection (dY/dT maksimum) — sade yaklaşım."""
-    m = np.ones_like(T, dtype=bool)
-    if tmin is not None: m &= (T>=tmin)
-    if tmax is not None: m &= (T<=tmax)
+def endotherm_is_down(T, Y, a, b):
+    """Erime penceresinde sinyal aşağı mı (endo down)?"""
+    m = (T>=a) & (T<=b)
+    if not np.any(m): return True
+    seg = Y[m]
+    return abs(np.nanmin(seg)) >= abs(np.nanmax(seg))
+
+def tg_inflection(T, Y, a, b):
+    m = (T>=a) & (T<=b)
     if not np.any(m): return np.nan
-    Tm = T[m]; Ym = Y[m]
-    # hafif yumuşatma
     from scipy.ndimage import gaussian_filter1d
-    Ys = gaussian_filter1d(Ym, sigma=7)
-    dY = np.gradient(Ys, Tm)
-    idx = np.nanargmax(np.abs(dY))  # step güçlü ise |dY| max
-    return float(Tm[idx])
+    x = T[m]; y = gaussian_filter1d(Y[m], sigma=7)
+    dy = np.gradient(y, x)
+    idx = np.nanargmax(np.abs(dy))
+    return float(x[idx])
 
-def choose_intervals(material_key: str):
-    """
-    Malzemeye göre kaba aralık önerileri (gerekirse UIdan override).
-    Type III kurallarına uygun defaultlar: 
-      - ΔHm: 2. ısıtma,
-      - ΔHc: soğuma,
-      - ΔHcc: 1. ısıtma (varsa).
-    Not: Sınırlar gerekirse geniş tutuldu. Kullanıcı değiştirebilir.
-    """
-    # Geniş default sınırlar (°C) — gerektiğinde UI’dan daraltılabilir.
-    if material_key.upper().startswith("PEEK"):
-        return {"tg": (120, 170), "hm": (300, 380), "hc": (180, 280), "hcc": (150, 260)}
-    if material_key.upper().startswith("PEKK"):
-        return {"tg": (130, 170), "hm": (290, 380), "hc": (160, 270), "hcc": (150, 260)}
-    if material_key.upper().startswith("PPS"):
-        return {"tg": (70, 110),  "hm": (240, 300), "hc": (150, 220), "hcc": (None, None)}
-    # generic
-    return {"tg": (50, 200), "hm": (150, 400), "hc": (80, 300), "hcc": (None, None)}
+def default_ranges(material:str):
+    m = (material or "").upper()
+    if m.startswith("PEEK"): return {"tg":(120,170), "hm":(300,385), "hc":(180,280), "hcc":(150,260)}
+    if m.startswith("PEKK"): return {"tg":(130,170), "hm":(290,380), "hc":(160,270), "hcc":(150,260)}
+    if m.startswith("PPS"):  return {"tg":(70,110),  "hm":(240,300), "hc":(150,220), "hcc":(None,None)}
+    return {"tg":(50,200), "hm":(150,400), "hc":(80,300), "hcc":(None,None)}
 
-def compute_results_TypeIII(material: str, df_all: pd.DataFrame, H1: pd.DataFrame, C: pd.DataFrame, H2: pd.DataFrame,
-                            dh0: float, polymer_mass_fraction: float, user_intervals: dict):
-    """
-    Type III kuralları:
-      - Tg: 1. veya 2. ısıtma kullanılabilir; pratikte 2. ısıtma daha nettir. Burada H2’den alıyoruz.
-      - Tm, ΔHm: 2. ısıtma (H2)
-      - Tc, ΔHc: Soğuma (C)
-      - ΔHcc: 1. ısıtma (H1), varsa
-    """
-    # Intervals
-    Tg_lo, Tg_hi = user_intervals["tg"]
-    Hm_lo, Hm_hi = user_intervals["hm"]
-    Hc_lo, Hc_hi = user_intervals["hc"]
-    Hcc_lo, Hcc_hi = user_intervals["hcc"]
+def compute_typeIII(df_all, H1, C, H2, material, dh0, polymer_frac):
+    R = default_ranges(material)
+    Tg = Tm = Tc = np.nan
+    dHm = dHc = np.nan
+    dHcc = 0.0
 
-    # Arrays
-    def arr(df):
-        return df["Temp"].to_numpy(), df["HeatFlow"].to_numpy()
-
-    # Defaults
-    Tg = np.nan; Tm = np.nan; Tc = np.nan
-    dHm = np.nan; dHc = np.nan; dHcc = 0.0  # Hcc yoksa 0 kabul
-    # Tg: H2’den (daha tekrarlanabilir)
+    # Tg → 2. ısıtma daha net
     if not H2.empty:
-        T2,Y2 = arr(H2)
-        Tg = tg_inflection(T2, Y2, Tg_lo, Tg_hi)
-        # ΔHm ve Tm
-        Tm = peak_max(T2, Y2, Hm_lo, Hm_hi)
-        dHm = linear_baseline_integral(T2, Y2, Hm_lo, Hm_hi)
-    # Tc ve ΔHc: cooling
-    if not C.empty:
-        Tc = peak_min(C["Temp"].to_numpy(), C["HeatFlow"].to_numpy(), Hc_lo, Hc_hi)
-        dHc = linear_baseline_integral(C["Temp"].to_numpy(), C["HeatFlow"].to_numpy(), Hc_lo, Hc_hi)
-        # Exotherm negatif olabilir → mutlakla
-        if not math.isnan(dHc) and dHc > 0:
-            dHc = -abs(dHc)
-    # ΔHcc: H1’de (varsa)
-    if not H1.empty and Hcc_lo is not None and Hcc_hi is not None:
-        T1,Y1 = arr(H1)
-        # Soğuk kristallenme pikini 1. ısıtmada min arayarak yakala (çoğunlukla ekzotermik)
-        dHcc_val = linear_baseline_integral(T1, Y1, Hcc_lo, Hcc_hi)
-        if not math.isnan(dHcc_val):
-            dHcc = dHcc_val  # genelde negatif gelir → formülde "-" ile kullanılacak
+        T2 = H2["Temp"].to_numpy(); Y2 = H2["HeatFlow"].to_numpy()
+        Tg = tg_inflection(T2, Y2, *R["tg"])
+        # Erime (endo up/down algıla)
+        hm_down = endotherm_is_down(T2, Y2, *R["hm"])
+        Tm = peak_in_window(T2, Y2, *R["hm"], mode=("min" if hm_down else "max"))
+        dHm = abs(baseline_area(T2, Y2, *R["hm"]))  # kristalinlikte mutlak değer kullan
+    else:
+        # fallback: tüm seriden
+        T = df_all["Temp"].to_numpy(); Y = df_all["HeatFlow"].to_numpy()
+        Tg = tg_inflection(T, Y, *R["tg"])
+        hm_down = endotherm_is_down(T, Y, *R["hm"])
+        Tm = peak_in_window(T, Y, *R["hm"], mode=("min" if hm_down else "max"))
+        dHm = abs(baseline_area(T, Y, *R["hm"]))
 
-    # Kristalinlik: Xc = ((ΔHm - |ΔHcc|) / (ΔH° * polymer_mass_fraction)) * 100
-    # ΔHc raporlanır (isteğe bağlı), Xc hesabında kullanılmaz (klasik yaklaşım).
-    corr = dHm - abs(dHcc if not math.isnan(dHcc) else 0.0)
-    denom = dh0 * max(polymer_mass_fraction, 1e-6)
-    Xc = (corr / denom) * 100.0 if (not math.isnan(corr) and denom>0) else np.nan
+    # ΔHc, Tc → soğuma
+    if not C.empty:
+        Tc = peak_in_window(C["Temp"].to_numpy(), C["HeatFlow"].to_numpy(), *R["hc"], mode="min")  # çoğu cihazda exo up; min aramak güvenli
+        dHc = baseline_area(C["Temp"].to_numpy(), C["HeatFlow"].to_numpy(), *R["hc"])
+    # ΔHcc → 1. ısıtma (varsa)
+    if not H1.empty and all(v is not None for v in R["hcc"]):
+        dHcc = abs(baseline_area(H1["Temp"].to_numpy(), H1["HeatFlow"].to_numpy(), *R["hcc"]))  # mutlak değer
+
+    corr = dHm - dHcc
+    denom = dh0 * max(polymer_frac, 1e-6)
+    Xc = (corr/denom)*100.0 if denom>0 else np.nan
+
+    def clean(x): 
+        return None if (x is None or (isinstance(x,float) and (math.isnan(x) or math.isinf(x)))) else round(float(x),2)
 
     return {
-        "Tg (°C)": None if math.isnan(Tg) else round(Tg, 2),
-        "Tm (°C)": None if math.isnan(Tm) else round(Tm, 2),
-        "Tc (°C)": None if math.isnan(Tc) else round(Tc, 2),
-        "ΔHm (J/g)": None if math.isnan(dHm) else round(dHm, 2),
-        "ΔHcc (J/g)": None if math.isnan(dHcc) else round(dHcc, 2),
-        "ΔHc (J/g)": None if math.isnan(dHc) else round(dHc, 2),
-        "Crystallinity Xc (%)": None if math.isnan(Xc) else round(Xc, 2),
-        "_cycle_notes": "Tg/Tm/ΔHm from 2nd heating; Tc/ΔHc from cooling; ΔHcc from 1st heating (if present)."
+        "Tg (°C)": clean(Tg),
+        "Tm (°C)": clean(Tm),
+        "Tc (°C)": clean(Tc),
+        "ΔHm (J/g)": clean(dHm),
+        "ΔHcc (J/g)": clean(dHcc),
+        "ΔHc (J/g)": clean(dHc),
+        "Crystallinity Xc (%)": clean(Xc),
+        "_note": "Tg/Tm/ΔHm from 2nd heating (fallback: all data); Tc/ΔHc from cooling; ΔHcc from 1st heating."
     }
 
-# -------------- Sidebar / Controls --------------
-
+# ---------- App UI ----------
 st.title("DSC Library")
 
-# (Korumalı) Upload alanı
-st.header("Upload")
-uploaded_files = st.file_uploader("Upload DSC .txt files", type=["txt"], accept_multiple_files=True)
-
-# Basit kalıcı liste (oturumluk). Mevcut uygulamadaki mantığı koruyoruz.
+# Kalıcı depo
 if "dsc_files" not in st.session_state:
-    st.session_state["dsc_files"] = {}
+    st.session_state["dsc_files"] = {}  # key -> {orig_name,user_name,uploader,uploaded_at,bytes}
 
-# Yeni yüklenenleri ekle
-if uploaded_files:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    for i, f in enumerate(uploaded_files):
-        key = f"{f.name}__{ts}_{i}"  # benzersiz anahtar
-        st.session_state["dsc_files"][key] = {"name": f.name, "content": f.getvalue()}
+# Upload (çoklu), aynı akış
+st.header("Upload")
+new_files = st.file_uploader("Upload DSC .txt files", type=["txt"], accept_multiple_files=True)
+if new_files:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for f in new_files:
+        k = f"{uuid.uuid4().hex}"
+        st.session_state["dsc_files"][k] = {
+            "orig_name": f.name,
+            "user_name": f.name,            # kullanıcı daha sonra düzenleyebilir
+            "uploader": current_user,
+            "uploaded_at": now,
+            "bytes": f.getvalue(),
+        }
 
+# Uploaded list + rename + delete
 st.header("Uploaded DSC Files")
 if not st.session_state["dsc_files"]:
     st.info("No files uploaded yet.")
 else:
-    df_list = pd.DataFrame([{"Key":k, "Filename":v["name"]} for k,v in st.session_state["dsc_files"].items()])
-    st.dataframe(df_list, use_container_width=True)
+    # tablo gibi satır satır kontroller:
+    for key, rec in list(st.session_state["dsc_files"].items()):
+        c1,c2,c3,c4,c5 = st.columns([3,3,2,2,1])
+        c1.write(rec["orig_name"])
+        new_name = c2.text_input("User Name", value=rec["user_name"], key=f"name_{key}")
+        if new_name != rec["user_name"]:
+            st.session_state["dsc_files"][key]["user_name"] = new_name
+        c3.write(rec["uploader"])
+        c4.write(rec["uploaded_at"])
+        if c5.button("Delete", key=f"del_{key}"):
+            del st.session_state["dsc_files"][key]
+            st.experimental_rerun()
 
-# Type ve Material (korundu)
+# Analiz seçimi
 st.header("Select a file to analyze")
-colA, colB = st.columns([2,1])
-with colA:
-    file_key = st.selectbox("Choose a file", options=list(st.session_state["dsc_files"].keys()) if st.session_state["dsc_files"] else [])
-with colB:
-    dsc_type = st.selectbox("Type", options=["Type III", "Type II", "Type I"], index=0)
-material = st.selectbox("Material", options=["PEEK", "PEKK", "PPS", "OTHER"], index=0)
+left, right = st.columns([2,1])
+options = [(k, f'{v["user_name"]}  ({v["orig_name"]})') for k,v in st.session_state["dsc_files"].items()]
+with left:
+    selected_key = st.selectbox("Choose a file", options=[k for k,_ in options], format_func=lambda k: dict(options)[k] if options else "")
+with right:
+    dsc_type = st.selectbox("Type", options=["Type III","Type II","Type I"], index=0)
+material = st.selectbox("Material", options=["PEEK","PEKK","PPS","OTHER"], index=0)
 
-# ΔH° override ve filler düzeltmesi
 with st.expander("Advanced (ΔH° and polymer fraction)"):
     default_dh0 = POLYMER_DH0_DEFAULTS.get(material, 130.0)
-    dh0 = st.number_input("ΔH° (J/g) for 100% crystalline polymer", value=float(default_dh0), step=1.0, format="%.2f",
-                          help="Literature defaults: PEEK=130, PEKK=130, PPS=112 J/g. Adjust if needed.")
-    polymer_fraction = st.number_input("Polymer mass fraction (1 - filler wt. fraction)", min_value=0.0, max_value=1.0, value=1.0, step=0.05)
+    dh0 = st.number_input("ΔH° (J/g)", value=float(default_dh0), step=1.0, format="%.2f")
+    polymer_frac = st.number_input("Polymer mass fraction (1 − filler wt. fraction)", min_value=0.0, max_value=1.0, value=1.0, step=0.05)
 
-# -------------- Analysis --------------
-
-if file_key:
-    raw = st.session_state["dsc_files"][file_key]["content"].decode("utf-8", errors="ignore")
+if selected_key:
+    raw = st.session_state["dsc_files"][selected_key]["bytes"].decode("utf-8","ignore")
     meta, df = parse_header_and_data(raw)
 
-    # Baş bilgiler (sample mass & heating rate dosyadan)
-    sm_col, hr_col, op_col = st.columns(3)
-    with sm_col:
-        st.metric("Sample Mass (mg)", f"{meta.get('sample_mass_mg') or '—'}")
-    with hr_col:
-        hr = meta.get("heating_rate_c_min")
-        st.metric("Heating Rate (°C/min)", f"{hr if hr is not None else '—'}")
-    with op_col:
-        st.metric("Operator", meta.get("operator") or "—")
+    # Heating rate: header + hesap
+    H1,C,H2 = run_split(df)
+    hr_calc_candidates = []
+    for seg in [H1,H2]:
+        r = calc_heating_rate(seg)
+        if r is not None and r>0: hr_calc_candidates.append(r)
+    hr_calc = float(np.median(hr_calc_candidates)) if hr_calc_candidates else calc_heating_rate(df)
 
-    # Raw Data (korundu) + download
+    # Üst metrikler
+    st.subheader("")
+    m1,m2,m3 = st.columns(3)
+    m1.metric("Sample Mass (mg)", f"{meta.get('sample_mass_mg') if meta.get('sample_mass_mg') is not None else '—'}")
+    hr_show = meta.get("heating_rate_header")
+    m2.metric("Heating Rate (°C/min)", f"{(hr_show if hr_show is not None else (round(hr_calc,2) if hr_calc else '—'))}")
+    m3.metric("Operator", meta.get("operator") or "—")
+
+    # uyuşmazlık uyarısı
+    if meta.get("heating_rate_header") and hr_calc:
+        if abs(hr_calc - meta["heating_rate_header"])/max(meta["heating_rate_header"],1e-6) > 0.10:
+            st.warning(f"Header HR={meta['heating_rate_header']:.2f} °C/min, Calculated HR={hr_calc:.2f} °C/min (check program).")
+
+    # Raw data + download (aynı)
     st.subheader("Raw Data")
     st.dataframe(df, use_container_width=True, height=300)
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download raw data (CSV)", csv, file_name=f"{meta.get('sample_name','sample')}_raw.csv", mime="text/csv")
+    st.download_button("⬇️ Download raw data (CSV)", df.to_csv(index=False).encode("utf-8"),
+                       file_name=f"{(meta.get('sample_name') or 'sample')}_raw.csv", mime="text/csv")
 
-    # Eğrileri ayır
-    H1, C, H2 = split_cycles(df)
-
-    # Grafik — sade ve indirilebilir (modebar toImage açık)
+    # DSC Curve (tek eğri, indirilebilir)
     st.subheader("DSC Curve with Analysis")
     fig = go.Figure()
-    def add_trace(D, name):
-        if not D.empty:
-            fig.add_trace(go.Scatter(x=D["Temp"], y=D["HeatFlow"], mode="lines", name=name))
-    add_trace(H1, "Heating 1")
-    add_trace(C,  "Cooling")
-    add_trace(H2, "Heating 2")
-    if H1.empty and C.empty and H2.empty:
-        # tek seri ise tüm veriyi çiz
-        fig.add_trace(go.Scatter(x=df["Temp"], y=df["HeatFlow"], mode="lines", name="DSC"))
-    fig.update_layout(xaxis_title="Temperature (°C)", yaxis_title="Heat Flow (W/g)", legend_title="Segment")
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "toImageButtonOptions": {"format": "png"}})
+    fig.add_trace(go.Scatter(x=df["Temp"], y=df["HeatFlow"], mode="lines", name="DSC"))
+    fig.update_layout(xaxis_title="Temperature (°C)", yaxis_title="Heat Flow (W/g)", legend_title="")
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "toImageButtonOptions": {"format":"png"}})
 
-    # Sonuçlar — tek blok (Type III varsayılan)
+    # Sonuçlar — tek blok (Type III)
     st.subheader("Calculated Results (Type III)")
-    # Malzemeye göre önerilen aralıklar (UI’dan isteğe göre expose edilebilir)
-    suggested = choose_intervals(material)
-    results = compute_results_TypeIII(material, df, H1, C, H2, dh0=float(dh0), polymer_mass_fraction=float(polymer_fraction), user_intervals=suggested)
-
-    # Sade tablo
+    results = compute_typeIII(df, H1, C, H2, material, dh0, polymer_frac)
     show = {k:v for k,v in results.items() if not k.startswith("_")}
-    res_df = pd.DataFrame(show, index=["Result"])
-    st.dataframe(res_df, use_container_width=True)
-
-    # Kısa özet metni (kafa karıştırmayan)
-    lines = []
-    if show.get("Tg (°C)") is not None: lines.append(f"Tg = {show['Tg (°C)']} °C")
-    if show.get("Tm (°C)") is not None: lines.append(f"Tm = {show['Tm (°C)']} °C")
-    if show.get("Tc (°C)") is not None: lines.append(f"Tc = {show['Tc (°C)']} °C")
-    if show.get("ΔHm (J/g)") is not None: lines.append(f"ΔHm = {show['ΔHm (J/g)']} J/g")
-    if show.get("ΔHcc (J/g)") is not None: lines.append(f"ΔHcc = {show['ΔHcc (J/g)']} J/g")
-    if show.get("ΔHc (J/g)") is not None: lines.append(f"ΔHc = {show['ΔHc (J/g)']} J/g")
-    if show.get("Crystallinity Xc (%)") is not None: lines.append(f"Xc = {show['Crystallinity Xc (%)']} %")
-    summary = "; ".join(lines) if lines else "No calculable result in the selected ranges."
-    st.info(summary)
-
-    # Mini not: hangi çevrimler kullanıldı + düzeltmeler
-    st.caption(f"{results.get('_cycle_notes','')}  ΔH°={dh0:.1f} J/g; polymer fraction={polymer_fraction:.2f}.")
+    st.dataframe(pd.DataFrame(show, index=["Result"]), use_container_width=True)
+    # kısa özet
+    items = []
+    for k in ["Tg (°C)","Tm (°C)","Tc (°C)","ΔHm (J/g)","ΔHcc (J/g)","ΔHc (J/g)","Crystallinity Xc (%)"]:
+        if show.get(k) is not None: items.append(f"{k.replace(' (°C)','').replace(' (J/g)','')} = {show[k]}")
+    st.info(";  ".join(items) if items else "No calculable result in the default ranges.")
+    st.caption(f"{results.get('_note','')}  ΔH°={dh0:.1f} J/g; polymer fraction={polymer_frac:.2f}.")
 else:
     st.info("Select a file to analyze.")
