@@ -1,15 +1,7 @@
 # 5_DSC_Library.py — DSC Library
-# Features:
-# - Auth guard (requires a logged-in session)
-# - Upload → Stage (form) → Pre-name → Add to Library (dedup with MD5)
-# - Library table (Original, User Name, Uploader, Time, Delete)
-# - Clean select list (User Name (Original))
-# - Correct heating-rate read (header) + robust fallback (regression on H1/H2)
-# - Raw Data table with units + CSV download
-# - Single clean DSC curve (download from Plotly modebar)
-# - Type III one-block results: Tg, Tm, Tc, ΔHm, ΔHcc, ΔHc, Xc
-# - Endotherm direction auto-detect; linear-baseline integration
-# - ΔH° and polymer mass fraction adjustable
+# Changes in this version:
+# - DISPLAY UNITS: Heat Flow shown/downloaded in mW (x1000), while internal calculations still use W/g.
+# - NICER PLOT: custom color, thicker line, soft grid, smooth hover.
 
 import io, re, math, uuid, hashlib
 from datetime import datetime
@@ -421,9 +413,13 @@ if selected_key:
         if abs(hr_calc - meta["heating_rate_header"]) / max(meta["heating_rate_header"], 1e-6) > 0.10:
             st.warning(f"Header HR={meta['heating_rate_header']:.2f} °C/min, Calculated HR={hr_calc:.2f} °C/min (check program).")
 
-    # Raw data (with units) + download
+    # Raw data (with units mW) + download
     st.subheader("Raw Data")
-    df_disp = df.rename(columns={"Time": "Time (min)", "Temp": "Temperature (°C)", "HeatFlow": "Heat Flow (W/g)"})
+    df_disp = pd.DataFrame({
+        "Time (min)": df["Time"],
+        "Temperature (°C)": df["Temp"],
+        "Heat Flow (mW)": df["HeatFlow"] * 1000.0  # DISPLAY SCALE
+    })
     st.dataframe(df_disp, use_container_width=True, height=300)
     st.download_button(
         "⬇️ Download raw data (CSV)",
@@ -432,14 +428,30 @@ if selected_key:
         mime="text/csv",
     )
 
-    # DSC curve (single, downloadable via modebar)
+    # DSC curve — prettier styling (and mW on y-axis)
     st.subheader("DSC Curve with Analysis")
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["Temp"], y=df["HeatFlow"], mode="lines", name="DSC"))
-    fig.update_layout(xaxis_title="Temperature (°C)", yaxis_title="Heat Flow (W/g)", legend_title="")
+    fig.add_trace(go.Scatter(
+        x=df["Temp"],
+        y=df["HeatFlow"] * 1000.0,  # DISPLAY SCALE
+        mode="lines",
+        name="DSC",
+        line=dict(width=3, shape="spline", smoothing=0.7, color="#60A5FA"),  # soft blue
+        hovertemplate="T = %{x:.2f} °C<br>HF = %{y:.3f} mW<extra></extra>",
+    ))
+    fig.update_layout(
+        xaxis_title="Temperature (°C)",
+        yaxis_title="Heat Flow (mW)",
+        legend_title="",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.08)"),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.08)"),
+        margin=dict(l=40, r=20, t=10, b=40),
+    )
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "toImageButtonOptions": {"format": "png"}})
 
-    # Results — single block (Type III logic)
+    # Results — single block (Type III)
     st.subheader("Calculated Results (Type III)")
     results = compute_typeIII(df, H1, C, H2, material, dh0, polymer_frac)
     show = {k: v for k, v in results.items() if not k.startswith("_")}
