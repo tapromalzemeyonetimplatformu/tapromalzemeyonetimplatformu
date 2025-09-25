@@ -8,7 +8,6 @@ from pathlib import Path
 
 # ---- Opsiyon 2 için HTTP istekleri ----
 import re
-import math
 import requests
 
 # =========================
@@ -164,7 +163,6 @@ def _safe_join_authors(authorships):
 
 def _abstract_from_openalex(inv_index: dict):
     # OpenAlex returns abstract_inverted_index (word -> [positions])
-    # We reconstruct a rough abstract by placing words in order.
     try:
         positions = []
         for word, idxs in inv_index.items():
@@ -173,7 +171,6 @@ def _abstract_from_openalex(inv_index: dict):
         positions.sort(key=lambda x: x[0])
         words = [w for _, w in positions]
         text = " ".join(words)
-        # Minor cleanup
         text = re.sub(r"\s+", " ", text).strip()
         return text
     except Exception:
@@ -197,9 +194,6 @@ def _dedupe_results(rows):
 
 # ---- Providers ----
 def search_openalex(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, per_page=20):
-    """
-    Docs: https://docs.openalex.org/
-    """
     base = "https://api.openalex.org/works"
     params = {
         "search": query,
@@ -214,9 +208,7 @@ def search_openalex(query: str, year_from: int|None, year_to: int|None, oa_only:
     if oa_only:
         filters.append("open_access.is_oa:true")
     if doc_type and doc_type != "any":
-        # OpenAlex doc types example: journal-article, proceedings-article, dataset, etc.
         filters.append(f"type:{doc_type}")
-
     if filters:
         params["filter"] = ",".join(filters)
 
@@ -234,13 +226,12 @@ def search_openalex(query: str, year_from: int|None, year_to: int|None, oa_only:
         year = w.get("publication_year")
         doi = w.get("doi")
         primary_loc = w.get("primary_location") or {}
-        # Candidate URLs
         candidate_url = _first_nonempty(
             primary_loc.get("landing_page_url"),
             primary_loc.get("pdf_url"),
             w.get("open_access", {}).get("oa_url"),
             w.get("host_venue", {}).get("url"),
-            w.get("id")  # OpenAlex URI as last resort
+            w.get("id")
         )
         authors = _safe_join_authors(w.get("authorships", []))
         venue = (w.get("host_venue") or {}).get("display_name")
@@ -264,9 +255,6 @@ def search_openalex(query: str, year_from: int|None, year_to: int|None, oa_only:
     return results
 
 def search_crossref(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, rows=20):
-    """
-    Docs: https://api.crossref.org/
-    """
     base = "https://api.crossref.org/works"
     params = {
         "query": query,
@@ -281,15 +269,16 @@ def search_crossref(query: str, year_from: int|None, year_to: int|None, oa_only:
         filters.append(f"to-pub-date:{year_to}-12-31")
     if doc_type and doc_type != "any":
         filters.append(f"type:{doc_type}")
-    if oa_only:
-        # Crossref doesn't have a perfect OA filter; we'll leave it to user to check URLs/Unpaywall later
-        pass
-
     if filters:
         params["filter"] = ",".join(filters)
 
     try:
-        r = requests.get(base, params=params, timeout=15, headers={"User-Agent": "COMPADDITIVE/1.0 (mailto:example@example.com)"})
+        r = requests.get(
+            base,
+            params=params,
+            timeout=15,
+            headers={"User-Agent": "COMPADDITIVE/1.0 (mailto:contact@example.com)"}
+        )
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -313,7 +302,6 @@ def search_crossref(query: str, year_from: int|None, year_to: int|None, oa_only:
         venue = container[0] if container else None
         abstract = item.get("abstract")
         if abstract:
-            # Crossref abstract may contain HTML tags
             abstract = re.sub("<.*?>", "", abstract).strip()
 
         results.append({
@@ -336,15 +324,12 @@ def unified_search(query, year_from, year_to, oa_only, doc_type, providers):
     if "Crossref" in providers:
         rows += search_crossref(query, year_from, year_to, oa_only, doc_type)
 
-    # Basit birleştime + deduplikasyon
     rows = _dedupe_results(rows)
-    # Skor yoksa: yeni -> eski ağırlıklı sırala, başlığı boş olmayanlar öne
     rows.sort(key=lambda r: (-(r.get("year") or 0), r.get("title") is None))
     return rows
 
 # ---- Add to Shared List ----
 def add_to_shared_list(item, rationale, tags, priority, status):
-    # duplicate control by doi/url/title
     key = item.get("doi") or item.get("url") or item.get("title","").lower()
     exists = any(
         (x.get("doi") or x.get("url") or x.get("title","").lower()) == key
@@ -363,7 +348,7 @@ def add_to_shared_list(item, rationale, tags, priority, status):
         "year": item.get("year"),
         "source": item.get("source"),
         "provider": item.get("provider"),
-        "abstract": item.get("abstract")[:2000],  # limit
+        "abstract": (item.get("abstract") or "")[:2000],
         "added_by": USERNAME,
         "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "rationale": rationale,
@@ -447,7 +432,7 @@ def render_search_ui():
                             ok = add_to_shared_list(r, rationale, tags, priority, status)
                             if ok:
                                 st.success("Added to shared list.")
-                            st.experimental_rerun()
+                            st.rerun()   # ← DÜZELTME: experimental_rerun yerine rerun
 
     st.markdown("---")
     st.subheader("📚 Shared Reading List (visible to all users)")
@@ -498,11 +483,10 @@ def render_search_ui():
 
                 with c3:
                     if st.button("🗑️ Delete", key=f"del_{i}_{it.get('doi') or it.get('url') or i}"):
-                        # remove from saved_items (by identity)
                         idx_real = saved_items["items"].index(it)
                         saved_items["items"].pop(idx_real)
                         save_saved_items()
-                        st.experimental_rerun()
+                        st.rerun()
 
         # Export
         exp_c1, exp_c2 = st.columns([1,1])
