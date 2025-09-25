@@ -462,11 +462,11 @@ def add_to_shared_list(item, rationale, tags, priority, status):
 #  UI RENDER (Option 2)
 # =========================
 def render_search_ui():
-    st.subheader("🧠 Literature search with AI")
+    st.subheader("Literature search with AI")
 
     with st.form("lr_search_form", clear_on_submit=False):
         query = st.text_input("Enter topic or keywords", key="lr_query",
-                              placeholder="e.g., PEEK FFF interlayer adhesion; PEKK crystallization kinetics")
+                              placeholder="e.g., Carbon Fiber Reinforced PPS")
         c1, c2, c3, c4 = st.columns([1,1,1,1])
 
         with c1:
