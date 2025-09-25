@@ -171,7 +171,7 @@ def delete_entry(row_id: int):
 # UI: Page
 # ===============================
 st.set_page_config(page_title="Production Tracker", page_icon="📘", layout="wide")
-st.title("📘 Production Tracker")
+st.title("Production Tracker")
 
 init_db()
 
@@ -180,23 +180,23 @@ with st.expander("➕ Create New Production Record", expanded=True):
         # NOTE: Order matches your requested list exactly
         col1, col2, col3 = st.columns(3)
         with col1:
-            raw_material = st.text_input("Raw Material (e.g. PEEK)", placeholder="PEEK")
+            raw_material = st.text_input("Raw Material", placeholder="PEEK")
             project_name = st.selectbox(
-                "Project Name (CREDIT/COMPADDITIVE)", options=["CREDIT", "COMPADDITIVE"]
+                "Project Name", options=["CREDIT", "COMPADDITIVE"]
             )
-            supplier_name = st.text_input("Supplier Name (e.g. INTAMSYS)", placeholder="INTAMSYS")
-            technology = st.text_input("Technology (e.g. FDM)", placeholder="FDM")
+            supplier_name = st.text_input("Supplier Name", placeholder="INTAMSYS")
+            technology = st.text_input("Technology", placeholder="FDM")
             production_date = st.date_input(
                 "Production Date", value=date.today(), format="YYYY-MM-DD"
             )
         with col2:
             direction_angle = st.text_input(
-                "Direction and Angle (e.g. ZX 45°)", placeholder="ZX 45°"
+                "Direction and Angle", placeholder="ZX 45°"
             )
             producer_name = st.text_input(
-                "Producer Name (e.g. Necip Hayran)", placeholder="Necip Hayran"
+                "Producer Name", placeholder="Necip Hayran"
             )
-            printing_machine = st.text_input("Printing Machine (e.g. 610)", placeholder="610")
+            printing_machine = st.text_input("Printing Machine", placeholder="610")
             sample_count = st.number_input("Sample Count", min_value=1, step=1, value=1)
             tests_planned_done = st.text_area(
                 "Tests Planned/Done",
@@ -319,4 +319,5 @@ else:
             st.code(str(row["Tests Planned/Done"]).strip() or "-", language="markdown")
             st.markdown("**Process Parameters**")
             st.code(str(row["Process Parameters"]).strip() or "-", language="markdown")
+
 
