@@ -71,9 +71,9 @@ st.subheader("➕ Create New SEM & EDS Entry")
 with st.form("sem_eds_form", clear_on_submit=True):
     c1, c2 = st.columns([1, 1])
     with c1:
-        production_name = st.text_input("Production Name", placeholder="e.g. Sample Batch #45")
-        producer = st.text_input("Producer", placeholder="e.g. Zeynep Ege Uysal")
-        sample_no = st.text_input("Sample No.", placeholder="e.g. SEM-EDS-001")
+        production_name = st.text_input("Raw Material, Direction and Angle", placeholder="e.g. PEEK CF ZX 45°")
+        producer = st.text_input("Tester", placeholder="e.g. Zeynep Ege Uysal")
+        sample_no = st.text_input("Sample No.", placeholder="e.g. 1")
     with c2:
         project_name = st.radio("Project Name", ["CREDIT", "COMPADDITIVE"], horizontal=True)
         test_date = st.date_input("Test Date", value=datetime.now().date(), format="YYYY-MM-DD")
@@ -232,4 +232,5 @@ else:
                 save_records(new_df)
                 st.success("Entry deleted.")
                 st.rerun()
+
 
