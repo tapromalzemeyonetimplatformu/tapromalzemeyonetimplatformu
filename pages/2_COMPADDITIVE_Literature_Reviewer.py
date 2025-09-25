@@ -4,9 +4,6 @@ import os
 import json
 from datetime import datetime
 import base64
-from pathlib import Path
-
-# ---- Opsiyon 2 için HTTP istekleri ----
 import re
 import requests
 
@@ -146,7 +143,6 @@ def display_uploaded_files():
 # =========================
 #  OPTION 2 (SEARCH ENGINE)
 # =========================
-# ---- Helpers to normalize text ----
 def _safe_join_authors(authorships):
     if not authorships:
         return []
@@ -162,7 +158,7 @@ def _safe_join_authors(authorships):
     return names
 
 def _abstract_from_openalex(inv_index: dict):
-    # OpenAlex returns abstract_inverted_index (word -> [positions])
+    # reconstruct abstract from inverted index (OpenAlex)
     try:
         positions = []
         for word, idxs in inv_index.items():
@@ -195,11 +191,7 @@ def _dedupe_results(rows):
 # ---- Providers ----
 def search_openalex(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, per_page=20):
     base = "https://api.openalex.org/works"
-    params = {
-        "search": query,
-        "per_page": per_page,
-        "sort": "relevance_score:desc"
-    }
+    params = {"search": query, "per_page": per_page, "sort": "relevance_score:desc"}
     filters = []
     if year_from:
         filters.append(f"from_publication_date:{year_from}-01-01")
@@ -266,7 +258,8 @@ def search_crossref(query: str, year_from: int|None, year_to: int|None, oa_only:
     if year_from:
         filters.append(f"from-pub-date:{year_from}-01-01")
     if year_to:
-        filters.append(f"to-pub-date:{year_to}-12-31")
+        # ✅ Crossref doğru parametre: until-pub-date
+        filters.append(f"until-pub-date:{year_to}-12-31")
     if doc_type and doc_type != "any":
         filters.append(f"type:{doc_type}")
     if filters:
@@ -360,6 +353,9 @@ def add_to_shared_list(item, rationale, tags, priority, status):
     save_saved_items()
     return True
 
+# =========================
+#  UI RENDER
+# =========================
 def render_search_ui():
     st.subheader("🧠 Literature search with AI")
 
@@ -432,14 +428,14 @@ def render_search_ui():
                             ok = add_to_shared_list(r, rationale, tags, priority, status)
                             if ok:
                                 st.success("Added to shared list.")
-                            st.rerun()   # ← DÜZELTME: experimental_rerun yerine rerun
+                            st.rerun()
 
     st.markdown("---")
     st.subheader("📚 Shared Reading List (visible to all users)")
     if not saved_items["items"]:
         st.info("No entries in the shared list yet.")
     else:
-        # Small filters for usability
+        # small filters
         f1, f2, f3 = st.columns([1,1,1])
         with f1:
             flt_user = st.text_input("Filter by user", key="flt_user")
@@ -448,7 +444,6 @@ def render_search_ui():
         with f3:
             flt_status = st.selectbox("Filter by status", ["(all)", "To Read", "Reading", "Read", "Summarized"], index=0, key="flt_status")
 
-        # Filter data
         rows = saved_items["items"]
         if flt_user.strip():
             rows = [x for x in rows if x.get("added_by","").lower().find(flt_user.lower()) >= 0]
@@ -457,7 +452,6 @@ def render_search_ui():
         if flt_status != "(all)":
             rows = [x for x in rows if x.get("status") == flt_status]
 
-        # Display rows
         for i, it in enumerate(rows):
             with st.container(border=True):
                 c1, c2, c3 = st.columns([0.6, 0.25, 0.15])
