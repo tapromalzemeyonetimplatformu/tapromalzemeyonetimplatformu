@@ -1,4 +1,4 @@
-# ✅ COMPADDITIVE_Literature_Reviewer.py  (updated with Europe PMC, Semantic Scholar, CORE)
+# ✅ COMPADDITIVE_Literature_Reviewer.py  (CORE kaldırıldı + güvenli meta yazımı + uyarı bastırma)
 import streamlit as st
 import os
 import json
@@ -7,7 +7,6 @@ import base64
 import re
 import requests
 import xml.etree.ElementTree as ET
-import os as _os
 
 # =========================
 #  AUTH & PAGE METADATA
@@ -215,8 +214,8 @@ def search_openalex(query: str, year_from: int|None, year_to: int|None, oa_only:
         r = requests.get(base, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
-    except Exception as e:
-        st.warning(f"OpenAlex request failed: {e}")
+    except Exception:
+        # uyarı yok; sessiz atla
         return []
 
     results = []
@@ -270,15 +269,13 @@ def search_arxiv(query: str, year_from: int|None, year_to: int|None, oa_only: bo
         r = requests.get(url, timeout=15, headers={"User-Agent": "COMPADDITIVE/1.0"})
         r.raise_for_status()
         xml = r.text
-    except Exception as e:
-        st.warning(f"arXiv request failed: {e}")
+    except Exception:
         return []
 
     ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
     try:
         root = ET.fromstring(xml)
-    except Exception as e:
-        st.warning(f"arXiv parse error: {e}")
+    except Exception:
         return []
 
     rows = []
@@ -344,8 +341,7 @@ def search_doaj(query: str, year_from: int|None, year_to: int|None, oa_only: boo
         r = requests.get(url, params=params, timeout=15, headers={"User-Agent": "COMPADDITIVE/1.0"})
         r.raise_for_status()
         data = r.json()
-    except Exception as e:
-        st.warning(f"DOAJ request failed: {e}")
+    except Exception:
         return []
 
     rows = []
@@ -403,7 +399,6 @@ def search_doaj(query: str, year_from: int|None, year_to: int|None, oa_only: boo
 # ---------- Europe PMC ----------
 def search_europe_pmc(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, page_size=25):
     base = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-    # Europe PMC query dili geniş; basit kullanım:
     q = query
     if oa_only:
         q = f"({query}) AND OPEN_ACCESS:Y"
@@ -417,8 +412,7 @@ def search_europe_pmc(query: str, year_from: int|None, year_to: int|None, oa_onl
         r = requests.get(base, params=params, timeout=15, headers={"User-Agent": "COMPADDITIVE/1.0"})
         r.raise_for_status()
         data = r.json()
-    except Exception as e:
-        st.warning(f"Europe PMC request failed: {e}")
+    except Exception:
         return []
 
     rows = []
@@ -433,22 +427,18 @@ def search_europe_pmc(query: str, year_from: int|None, year_to: int|None, oa_onl
         # Authors
         authors = []
         if it.get("authorString"):
-            # split by comma (A; B; sometimes)
-            # authorString often like "A. Smith; B. Jones"
             parts = re.split(r"[;,]", it["authorString"])
             authors = [p.strip() for p in parts if p.strip()]
 
         # Links / DOI
         doi = it.get("doi")
         url = None
-        # Try full text URLs if OA, else landing page
         ftu = (it.get("fullTextUrlList", {}) or {}).get("fullTextUrl", []) or []
         for u in ftu:
             if u.get("url"):
                 url = u["url"]
                 break
         if not url:
-            # Fallback to Europe PMC landing page
             if it.get("id") and it.get("source"):
                 url = f"https://europepmc.org/abstract/{it['source']}/{it['id']}"
 
@@ -475,19 +465,21 @@ def search_europe_pmc(query: str, year_from: int|None, year_to: int|None, oa_onl
     return rows
 
 # ---------- Semantic Scholar ----------
-def search_semantic_scholar(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, limit=25):
+def search_semantic_scholar(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, limit=10):
     base = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
         "query": query,
-        "limit": limit,
+        "limit": limit,  # limit düşürüldü → rate limit ihtimali azalır
         "fields": "title,year,authors,venue,externalIds,url,abstract,isOpenAccess,openAccessPdf"
     }
     try:
         r = requests.get(base, params=params, timeout=15, headers={"User-Agent": "COMPADDITIVE/1.0"})
+        # 429 ise sessiz atla (sarı uyarı yok)
+        if r.status_code == 429:
+            return []
         r.raise_for_status()
         data = r.json()
-    except Exception as e:
-        st.warning(f"Semantic Scholar request failed: {e}")
+    except Exception:
         return []
 
     rows = []
@@ -505,8 +497,6 @@ def search_semantic_scholar(query: str, year_from: int|None, year_to: int|None, 
             is_oa = bool(p.get("isOpenAccess")) or bool((p.get("openAccessPdf") or {}).get("url"))
             if not is_oa:
                 continue
-
-        # Doc type not exposed consistently; ignore doc_type for S2
 
         authors = [a.get("name") for a in (p.get("authors") or []) if a.get("name")]
         source = p.get("venue")
@@ -533,97 +523,6 @@ def search_semantic_scholar(query: str, year_from: int|None, year_to: int|None, 
 
     return rows
 
-# ---------- CORE (API v3, requires API key) ----------
-def _get_core_api_key():
-    # Prefer Streamlit secrets, fallback env var
-    try:
-        return st.secrets.get("CORE_API_KEY", None)
-    except Exception:
-        return _os.getenv("CORE_API_KEY", None)
-
-def search_core(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, page_size=25):
-    api_key = _get_core_api_key()
-    if not api_key:
-        st.info("ℹ️ CORE search skipped: no CORE_API_KEY provided in st.secrets or environment.")
-        return []
-
-    # Docs: https://core.ac.uk/services#api (v3)
-    url = "https://core.ac.uk/api-v3/search/works"
-    params = {
-        "q": query,
-        "page": 1,
-        "pageSize": page_size
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "User-Agent": "COMPADDITIVE/1.0"
-    }
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        st.warning(f"CORE request failed: {e}")
-        return []
-
-    rows = []
-    for rec in data.get("results", []) or []:
-        # Field names can vary; try to be defensive
-        title = rec.get("title") or "(no title)"
-        year = rec.get("yearPublished") or rec.get("year")
-        if isinstance(year, str):
-            try: year = int(year)
-            except: year = None
-
-        # Authors
-        authors = []
-        for a in rec.get("authors", []) or []:
-            nm = a.get("name") or a.get("fullName") or a.get("displayName")
-            if nm: authors.append(nm)
-
-        # DOI
-        doi = None
-        ids = rec.get("identifiers") or rec.get("externalIds") or {}
-        if isinstance(ids, dict):
-            doi = ids.get("doi") or ids.get("DOI")
-        else:
-            # sometimes list of dicts
-            for iobj in (ids or []):
-                if isinstance(iobj, dict) and iobj.get("type","").lower() == "doi":
-                    doi = iobj.get("value") or iobj.get("id")
-                    break
-
-        # Links
-        url_link = rec.get("downloadUrl") or rec.get("fullTextLink") or rec.get("link") or rec.get("oaiUrl")
-        source = rec.get("publisher") or rec.get("source") or "CORE"
-        abstract = rec.get("abstract") or ""
-
-        # OA filter — CORE içerikleri çoğunlukla OA; explicit alan yoksa geç
-        if oa_only:
-            # If we have a direct PDF/downloadUrl assume OA
-            if not url_link:
-                # skip if we cannot infer OA
-                continue
-
-        rows.append({
-            "provider": "CORE",
-            "id": rec.get("id"),
-            "title": title,
-            "authors": authors,
-            "year": year,
-            "source": source,
-            "doi": doi,
-            "url": url_link,
-            "abstract": abstract[:2000]
-        })
-
-    if year_from:
-        rows = [x for x in rows if x["year"] and x["year"] >= year_from]
-    if year_to:
-        rows = [x for x in rows if x["year"] and x["year"] <= year_to]
-
-    return rows
-
 # ---------- Unified search ----------
 def unified_search(query, year_from, year_to, oa_only, doc_type, providers):
     rows = []
@@ -637,8 +536,6 @@ def unified_search(query, year_from, year_to, oa_only, doc_type, providers):
         rows += search_europe_pmc(query, year_from, year_to, oa_only, doc_type)
     if "Semantic Scholar" in providers:
         rows += search_semantic_scholar(query, year_from, year_to, oa_only, doc_type)
-    if "CORE" in providers:
-        rows += search_core(query, year_from, year_to, oa_only, doc_type)
 
     rows = _dedupe_results(rows)
     # Sort: new → old; missing titles last
@@ -697,7 +594,7 @@ def render_search_ui():
         with c4:
             doc_type = st.selectbox("Type", ["any", "journal-article", "proceedings-article", "book-chapter", "posted-content"], index=0)
 
-        providers_all = ["OpenAlex", "arXiv", "DOAJ", "Europe PMC", "Semantic Scholar", "CORE"]
+        providers_all = ["OpenAlex", "arXiv", "DOAJ", "Europe PMC", "Semantic Scholar"]  # CORE kaldırıldı
         providers = st.multiselect("Providers", providers_all, default=providers_all)
         submitted = st.form_submit_button("Search")
 
@@ -724,11 +621,17 @@ def render_search_ui():
                 tcol1, tcol2 = st.columns([0.75, 0.25])
                 with tcol1:
                     st.markdown(f"**{r.get('title') or '(no title)'}**")
+
+                    # Güvenli meta yazımı (KIRMIZI HATA FIX)
                     meta_bits = []
-                    if r.get("year"): meta_bits.append(str(r["year"]))
-                    if r.get("source"): meta_bits.append(r["source"])
-                    if r.get("provider"): meta_bits.append(r["provider"])
-                    st.caption(" • ".join(meta_bits) if meta_bits else "")
+                    if r.get("year") is not None:
+                        meta_bits.append(str(r.get("year")))
+                    if r.get("source"):
+                        meta_bits.append(str(r.get("source")))
+                    if r.get("provider"):
+                        meta_bits.append(str(r.get("provider")))
+                    safe_meta = " • ".join([str(x) for x in meta_bits if x is not None and str(x).strip() != ""])
+                    st.caption(safe_meta)
 
                     if r.get("authors"):
                         st.write(", ".join(r["authors"])[:500])
@@ -738,9 +641,9 @@ def render_search_ui():
 
                     link_line = []
                     if r.get("url"):
-                        link_line.append(f"[View Source]({r['url']})")
+                        link_line.append(f"[View Source]({str(r['url'])})")
                     if r.get("doi"):
-                        link_line.append(f"DOI: {r['doi']}")
+                        link_line.append(f"DOI: {str(r['doi'])}")
                     if link_line:
                         st.markdown(" | ".join(link_line))
 
@@ -783,13 +686,13 @@ def render_search_ui():
                 with c1:
                     st.markdown(f"**{it.get('title') or '(no title)'}**")
                     meta = []
-                    if it.get("year"): meta.append(str(it["year"]))
-                    if it.get("source"): meta.append(it["source"])
-                    if it.get("provider"): meta.append(it["provider"])
-                    if it.get("doi"): meta.append(f"DOI:{it['doi']}")
+                    if it.get("year") is not None: meta.append(str(it["year"]))
+                    if it.get("source"):          meta.append(str(it["source"]))
+                    if it.get("provider"):        meta.append(str(it["provider"]))
+                    if it.get("doi"):             meta.append(f"DOI:{str(it['doi'])}")
                     st.caption(" • ".join(meta))
                     if it.get("url"):
-                        st.markdown(f"[Open Link]({it['url']})")
+                        st.markdown(f"[Open Link]({str(it['url'])})")
                     if it.get("tags"):
                         st.write("Tags: " + ", ".join(it["tags"]))
                     if it.get("rationale"):
