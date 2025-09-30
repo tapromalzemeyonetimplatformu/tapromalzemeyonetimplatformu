@@ -6,6 +6,15 @@ st.set_page_config(page_title="Home", page_icon="🏠", layout="wide")
 # Sayfa başlığı
 st.title("🏠 Welcome to TA & PRO Common Space")
 
+# Fotoğrafları yan yana göstermek
+col1, col2 = st.columns(2)
+
+with col1:
+    st.image("images/logo1.jpg", caption="Logo 1", use_column_width=True)
+
+with col2:
+    st.image("images/logo2.png", caption="Logo 2", use_column_width=True)
+    
 # Yan menüdeki seçenekler
 page = st.sidebar.radio("📁 Navigation", [
     "Material Selector",
