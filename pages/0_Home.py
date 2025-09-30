@@ -1,5 +1,10 @@
 import streamlit as st
 
+# ✅ Kullanıcı giriş kontrolü
+if "authenticated" not in st.session_state or not st.session_state.authenticated:
+    st.error("🔒 You must be logged in to access this page.")
+    st.stop()
+
 # Sayfa başlığı ve düzeni
 st.set_page_config(page_title="Home", page_icon="🏠", layout="wide")
 
@@ -13,25 +18,23 @@ with col1:
 
 with col2:
     st.image("images/logo2.jpg", caption="Prodigma", width=450)
-
-page = st.sidebar.radio(
-    "📁 Navigation",
-    [
-        "Material Selector",
-        "Literature Reviewer",
-        "Tensile Test Library",
-        "DSC Library",
-        "SEM & EDS Library",
-        "Fatigue Test Library",
-        "Production Tracker",
-    ],
-)
+    
+# Yan menüdeki seçenekler
+page = st.sidebar.radio("📁 Navigation", [
+    "Material Selector",
+    "Literature Reviewer",
+    "Tensile Test Library",
+    "DSC Library",
+    "SEM & EDS Library",
+    "Fatigue Test Library",
+    "Production Tracker"
+])
 
 # Seçilen menüye göre sayfaya yönlendirme
-if page == "Material Selector":
+if page == "COMPADDITIVE Material Selection":
     st.switch_page("pages/1_Material_Selector.py")
 
-elif page == "Literature Reviewer":
+elif page == "COMPADDITIVE Literature Reviewer":
     st.switch_page("pages/2_Literature_Reviewer.py")
 
 elif page == "Tensile Test Library":
