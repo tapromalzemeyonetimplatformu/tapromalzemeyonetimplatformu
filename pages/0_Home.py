@@ -20,7 +20,7 @@ with col2:
     st.image("images/logo2.jpg", caption="Prodigma", width=450)
     
 # Yan menüdeki seçenekler
-page = st.sidebar.radio("📁 Navigation", [
+page = ([
     "Material Selector",
     "Literature Reviewer",
     "Tensile Test Library",
