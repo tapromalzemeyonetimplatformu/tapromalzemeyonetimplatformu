@@ -11,8 +11,8 @@ if "authenticated" not in st.session_state or not st.session_state.authenticated
     st.error("🔒 You must be logged in to access this page.")
     st.stop()
 
-st.set_page_config(page_title="COMPADDITIVE Material Selection", layout="wide")
-st.title("COMPADDITIVE Material Selection")
+st.set_page_config(page_title="Material Selector", layout="wide")
+st.title("Material Selector")
 
 # ---------------------------
 # 📋 Özellik listesi
