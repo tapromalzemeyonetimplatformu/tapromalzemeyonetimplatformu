@@ -9,10 +9,10 @@ st.title("🏠 Welcome to TA & PRO Common Space")
 col1, col2 = st.columns(2)
 
 with col1:
-    st.image("images/logo1.jpg", caption="Turkish Aerospace", use_container_width=True)
+    st.image("images/logo1.jpg", caption="Turkish Aerospace", width=300)
 
 with col2:
-    st.image("images/logo2.jpg", caption="Prodigma", use_container_width=True)
+    st.image("images/logo2.jpg", caption="Prodigma", width=300)
     
 # Yan menüdeki seçenekler
 page = st.sidebar.radio("📁 Navigation", [
