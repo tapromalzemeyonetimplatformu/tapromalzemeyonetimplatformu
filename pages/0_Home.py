@@ -31,10 +31,10 @@ page = st.sidebar.radio("📁 Navigation", [
 ])
 
 # Seçilen menüye göre sayfaya yönlendirme
-if page == "COMPADDITIVE Material Selection":
+if page == "Material Selector":
     st.switch_page("pages/1_Material_Selector.py")
 
-elif page == "COMPADDITIVE Literature Reviewer":
+elif page == "Literature Reviewer":
     st.switch_page("pages/2_Literature_Reviewer.py")
 
 elif page == "Tensile Test Library":
