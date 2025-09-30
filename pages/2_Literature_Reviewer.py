@@ -1,4 +1,4 @@
-# ✅ COMPADDITIVE_Literature_Reviewer.py
+# ✅ COMPADDITIVE_Literature_Reviewer.py  (updated with Europe PMC, Semantic Scholar, CORE)
 import streamlit as st
 import os
 import json
@@ -7,6 +7,7 @@ import base64
 import re
 import requests
 import xml.etree.ElementTree as ET
+import os as _os
 
 # =========================
 #  AUTH & PAGE METADATA
@@ -142,8 +143,7 @@ def display_uploaded_files():
             st.markdown("---")
 
 # =========================
-#  OPTION 2 (SEARCH ENGINE)
-#  Providers: OpenAlex, arXiv, DOAJ
+#  SEARCH HELPERS
 # =========================
 def _safe_join_authors(authorships):
     if not authorships:
@@ -152,7 +152,7 @@ def _safe_join_authors(authorships):
     for a in authorships:
         nm = None
         if isinstance(a, dict):
-            nm = a.get("author", {}).get("display_name") or a.get("display_name")
+            nm = a.get("author", {}).get("display_name") or a.get("display_name") or a.get("name")
         elif isinstance(a, str):
             nm = a
         if nm:
@@ -169,11 +169,17 @@ def _dedupe_results(rows):
     seen = set()
     uniq = []
     for r in rows:
-        key = r.get("doi") or r.get("url") or (r.get("title","").lower() + "|" + (str(r.get("year")) if r.get("year") else ""))
+        doi = (r.get("doi") or "").lower().strip()
+        url = (r.get("url") or "").strip()
+        key = doi or url or (r.get("title","").lower().strip() + "|" + (str(r.get("year")) if r.get("year") else ""))
         if key and key not in seen:
             seen.add(key)
             uniq.append(r)
     return uniq
+
+# =========================
+#  PROVIDERS
+# =========================
 
 # ---------- OpenAlex ----------
 def _abstract_from_openalex(inv_index: dict):
@@ -258,7 +264,6 @@ def _findall(node, tag, ns):
     return node.findall(tag, ns)
 
 def search_arxiv(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, max_results=25):
-    # arXiv query language: AND with +
     q = query.replace(" ", "+")
     url = f"https://export.arxiv.org/api/query?search_query=all:{q}&start=0&max_results={max_results}&sortBy=relevance&sortOrder=descending"
     try:
@@ -269,11 +274,7 @@ def search_arxiv(query: str, year_from: int|None, year_to: int|None, oa_only: bo
         st.warning(f"arXiv request failed: {e}")
         return []
 
-    # Parse Atom
-    ns = {
-        "atom": "http://www.w3.org/2005/Atom",
-        "arxiv": "http://arxiv.org/schemas/atom"
-    }
+    ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
     try:
         root = ET.fromstring(xml)
     except Exception as e:
@@ -284,7 +285,7 @@ def search_arxiv(query: str, year_from: int|None, year_to: int|None, oa_only: bo
     for entry in _findall(root, "atom:entry", ns):
         title = _text(_find(entry, "atom:title", ns))
         summary = _text(_find(entry, "atom:summary", ns))
-        published = _text(_find(entry, "atom:published", ns))  # e.g., 2024-06-15T...
+        published = _text(_find(entry, "atom:published", ns))
         year = None
         if published:
             try:
@@ -292,14 +293,12 @@ def search_arxiv(query: str, year_from: int|None, year_to: int|None, oa_only: bo
             except:
                 year = None
 
-        # Authors
         authors = []
         for a in _findall(entry, "atom:author", ns):
             nm = _text(_find(a, "atom:name", ns))
             if nm:
                 authors.append(nm)
 
-        # Links
         url_pdf = None
         url_abs = None
         for lk in _findall(entry, "atom:link", ns):
@@ -312,7 +311,6 @@ def search_arxiv(query: str, year_from: int|None, year_to: int|None, oa_only: bo
                 url_abs = href
         final_url = url_pdf or url_abs
 
-        # DOI (optional)
         doi = None
         doi_node = _find(entry, "arxiv:doi", ns)
         if doi_node is not None and _text(doi_node):
@@ -331,19 +329,15 @@ def search_arxiv(query: str, year_from: int|None, year_to: int|None, oa_only: bo
         }
         rows.append(item)
 
-    # Client-side filters (arXiv feed tarih filtresi kısıtlı)
     if year_from:
         rows = [x for x in rows if x["year"] and x["year"] >= year_from]
     if year_to:
         rows = [x for x in rows if x["year"] and x["year"] <= year_to]
 
-    # OA: arXiv zaten OA; doc_type yok sayılır.
     return rows
 
 # ---------- DOAJ (JSON API v2) ----------
 def search_doaj(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, page_size=25):
-    # Basit arama (q=), client-side yıl filtresi
-    # API: https://doaj.org/api/v2/docs#tag/Search
     url = "https://doaj.org/api/v2/search/articles/" + requests.utils.quote(query)
     params = {"pageSize": page_size}
     try:
@@ -359,27 +353,23 @@ def search_doaj(query: str, year_from: int|None, year_to: int|None, oa_only: boo
         bj = rec.get("bibjson", {}) or {}
         title = bj.get("title") or "(no title)"
         year = None
-        # Yıl için history ya da year alanı olabilir
         try:
             year = int(bj.get("year")) if bj.get("year") else None
         except:
             year = None
 
-        # Authors
         authors = []
         for a in bj.get("author", []) or []:
             nm = a.get("name") or ""
             if nm:
                 authors.append(nm)
 
-        # Links
         url_link = None
         for ln in bj.get("link", []) or []:
             if ln.get("url"):
                 url_link = ln["url"]
                 break
 
-        # Source / Journal
         source = None
         if bj.get("journal", {}):
             source = bj["journal"].get("title")
@@ -403,7 +393,230 @@ def search_doaj(query: str, year_from: int|None, year_to: int|None, oa_only: boo
             "abstract": abstract
         })
 
-    # Client-side filters (OA: DOAJ zaten OA)
+    if year_from:
+        rows = [x for x in rows if x["year"] and x["year"] >= year_from]
+    if year_to:
+        rows = [x for x in rows if x["year"] and x["year"] <= year_to]
+
+    return rows
+
+# ---------- Europe PMC ----------
+def search_europe_pmc(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, page_size=25):
+    base = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    # Europe PMC query dili geniş; basit kullanım:
+    q = query
+    if oa_only:
+        q = f"({query}) AND OPEN_ACCESS:Y"
+    params = {
+        "query": q,
+        "format": "json",
+        "pageSize": page_size,
+        "resultType": "lite"
+    }
+    try:
+        r = requests.get(base, params=params, timeout=15, headers={"User-Agent": "COMPADDITIVE/1.0"})
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        st.warning(f"Europe PMC request failed: {e}")
+        return []
+
+    rows = []
+    for it in (data.get("resultList", {}) or {}).get("result", []) or []:
+        title = it.get("title") or "(no title)"
+        year = None
+        try:
+            year = int(it.get("pubYear")) if it.get("pubYear") else None
+        except:
+            year = None
+
+        # Authors
+        authors = []
+        if it.get("authorString"):
+            # split by comma (A; B; sometimes)
+            # authorString often like "A. Smith; B. Jones"
+            parts = re.split(r"[;,]", it["authorString"])
+            authors = [p.strip() for p in parts if p.strip()]
+
+        # Links / DOI
+        doi = it.get("doi")
+        url = None
+        # Try full text URLs if OA, else landing page
+        ftu = (it.get("fullTextUrlList", {}) or {}).get("fullTextUrl", []) or []
+        for u in ftu:
+            if u.get("url"):
+                url = u["url"]
+                break
+        if not url:
+            # Fallback to Europe PMC landing page
+            if it.get("id") and it.get("source"):
+                url = f"https://europepmc.org/abstract/{it['source']}/{it['id']}"
+
+        source = it.get("journalTitle") or it.get("bookOrReportDetails") or "Europe PMC"
+        abstract = it.get("abstractText") or ""
+
+        rows.append({
+            "provider": "Europe PMC",
+            "id": it.get("id"),
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "source": source,
+            "doi": doi,
+            "url": url,
+            "abstract": abstract
+        })
+
+    if year_from:
+        rows = [x for x in rows if x["year"] and x["year"] >= year_from]
+    if year_to:
+        rows = [x for x in rows if x["year"] and x["year"] <= year_to]
+
+    return rows
+
+# ---------- Semantic Scholar ----------
+def search_semantic_scholar(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, limit=25):
+    base = "https://api.semanticscholar.org/graph/v1/paper/search"
+    params = {
+        "query": query,
+        "limit": limit,
+        "fields": "title,year,authors,venue,externalIds,url,abstract,isOpenAccess,openAccessPdf"
+    }
+    try:
+        r = requests.get(base, params=params, timeout=15, headers={"User-Agent": "COMPADDITIVE/1.0"})
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        st.warning(f"Semantic Scholar request failed: {e}")
+        return []
+
+    rows = []
+    for p in data.get("data", []) or []:
+        title = p.get("title") or "(no title)"
+        year = p.get("year")
+        if isinstance(year, str):
+            try:
+                year = int(year)
+            except:
+                year = None
+
+        # OA filter
+        if oa_only:
+            is_oa = bool(p.get("isOpenAccess")) or bool((p.get("openAccessPdf") or {}).get("url"))
+            if not is_oa:
+                continue
+
+        # Doc type not exposed consistently; ignore doc_type for S2
+
+        authors = [a.get("name") for a in (p.get("authors") or []) if a.get("name")]
+        source = p.get("venue")
+        external_ids = p.get("externalIds") or {}
+        doi = external_ids.get("DOI")
+        url = (p.get("openAccessPdf") or {}).get("url") or p.get("url")
+
+        rows.append({
+            "provider": "Semantic Scholar",
+            "id": None,
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "source": source,
+            "doi": doi,
+            "url": url,
+            "abstract": p.get("abstract") or ""
+        })
+
+    if year_from:
+        rows = [x for x in rows if x["year"] and x["year"] >= year_from]
+    if year_to:
+        rows = [x for x in rows if x["year"] and x["year"] <= year_to]
+
+    return rows
+
+# ---------- CORE (API v3, requires API key) ----------
+def _get_core_api_key():
+    # Prefer Streamlit secrets, fallback env var
+    try:
+        return st.secrets.get("CORE_API_KEY", None)
+    except Exception:
+        return _os.getenv("CORE_API_KEY", None)
+
+def search_core(query: str, year_from: int|None, year_to: int|None, oa_only: bool, doc_type: str|None, page_size=25):
+    api_key = _get_core_api_key()
+    if not api_key:
+        st.info("ℹ️ CORE search skipped: no CORE_API_KEY provided in st.secrets or environment.")
+        return []
+
+    # Docs: https://core.ac.uk/services#api (v3)
+    url = "https://core.ac.uk/api-v3/search/works"
+    params = {
+        "q": query,
+        "page": 1,
+        "pageSize": page_size
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "COMPADDITIVE/1.0"
+    }
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        st.warning(f"CORE request failed: {e}")
+        return []
+
+    rows = []
+    for rec in data.get("results", []) or []:
+        # Field names can vary; try to be defensive
+        title = rec.get("title") or "(no title)"
+        year = rec.get("yearPublished") or rec.get("year")
+        if isinstance(year, str):
+            try: year = int(year)
+            except: year = None
+
+        # Authors
+        authors = []
+        for a in rec.get("authors", []) or []:
+            nm = a.get("name") or a.get("fullName") or a.get("displayName")
+            if nm: authors.append(nm)
+
+        # DOI
+        doi = None
+        ids = rec.get("identifiers") or rec.get("externalIds") or {}
+        if isinstance(ids, dict):
+            doi = ids.get("doi") or ids.get("DOI")
+        else:
+            # sometimes list of dicts
+            for iobj in (ids or []):
+                if isinstance(iobj, dict) and iobj.get("type","").lower() == "doi":
+                    doi = iobj.get("value") or iobj.get("id")
+                    break
+
+        # Links
+        url_link = rec.get("downloadUrl") or rec.get("fullTextLink") or rec.get("link") or rec.get("oaiUrl")
+        source = rec.get("publisher") or rec.get("source") or "CORE"
+        abstract = rec.get("abstract") or ""
+
+        # OA filter — CORE içerikleri çoğunlukla OA; explicit alan yoksa geç
+        if oa_only:
+            # If we have a direct PDF/downloadUrl assume OA
+            if not url_link:
+                # skip if we cannot infer OA
+                continue
+
+        rows.append({
+            "provider": "CORE",
+            "id": rec.get("id"),
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "source": source,
+            "doi": doi,
+            "url": url_link,
+            "abstract": abstract[:2000]
+        })
+
     if year_from:
         rows = [x for x in rows if x["year"] and x["year"] >= year_from]
     if year_to:
@@ -420,9 +633,15 @@ def unified_search(query, year_from, year_to, oa_only, doc_type, providers):
         rows += search_arxiv(query, year_from, year_to, oa_only, doc_type)
     if "DOAJ" in providers:
         rows += search_doaj(query, year_from, year_to, oa_only, doc_type)
+    if "Europe PMC" in providers:
+        rows += search_europe_pmc(query, year_from, year_to, oa_only, doc_type)
+    if "Semantic Scholar" in providers:
+        rows += search_semantic_scholar(query, year_from, year_to, oa_only, doc_type)
+    if "CORE" in providers:
+        rows += search_core(query, year_from, year_to, oa_only, doc_type)
 
     rows = _dedupe_results(rows)
-    # Basit sıralama: yeni → eski, başlığı olmayan sona
+    # Sort: new → old; missing titles last
     rows.sort(key=lambda r: (-(r.get("year") or 0), r.get("title") is None))
     return rows
 
@@ -476,10 +695,10 @@ def render_search_ui():
         with c3:
             oa_only = st.checkbox("Open access only", value=False)
         with c4:
-            # Tip filtreleri şimdilik yalnız OpenAlex'te etkili
             doc_type = st.selectbox("Type", ["any", "journal-article", "proceedings-article", "book-chapter", "posted-content"], index=0)
 
-        providers = st.multiselect("Providers", ["OpenAlex", "arXiv", "DOAJ"], default=["OpenAlex", "arXiv", "DOAJ"])
+        providers_all = ["OpenAlex", "arXiv", "DOAJ", "Europe PMC", "Semantic Scholar", "CORE"]
+        providers = st.multiselect("Providers", providers_all, default=providers_all)
         submitted = st.form_submit_button("Search")
 
     if not st.session_state.get("lr_results"):
@@ -542,7 +761,6 @@ def render_search_ui():
     if not saved_items["items"]:
         st.info("No entries in the shared list yet.")
     else:
-        # küçük filtreler
         f1, f2, f3 = st.columns([1,1,1])
         with f1:
             flt_user = st.text_input("Filter by user", key="flt_user")
