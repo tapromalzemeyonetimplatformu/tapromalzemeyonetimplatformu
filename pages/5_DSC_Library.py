@@ -9,6 +9,11 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
+# ✅ Kullanıcı giriş kontrolü
+if "authenticated" not in st.session_state or not st.session_state.authenticated:
+    st.error("🔒 You must be logged in to access this page.")
+    st.stop()
+
 st.set_page_config(page_title="DSC Library", page_icon="🔥", layout="wide")
 
 # ----------------- Small utils -----------------
@@ -371,3 +376,4 @@ if sel:
     )
 else:
     st.info("Add a file to library, then select it here.")
+
