@@ -15,8 +15,8 @@ if "authenticated" not in st.session_state or not st.session_state.authenticated
     st.error("🔒 You must be logged in to access this page.")
     st.stop()
 
-st.set_page_config(page_title="COMPADDITIVE Literature Reviewer", layout="wide")
-st.title("COMPADDITIVE Literature Reviewer")
+st.set_page_config(page_title="Literature Reviewer", layout="wide")
+st.title("Literature Reviewer")
 
 USERNAME = st.session_state.get("username", "anonymous")
 
