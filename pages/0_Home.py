@@ -18,7 +18,20 @@ with col1:
 
 with col2:
     st.image("images/logo2.jpg", caption="Prodigma", width=450)
-    
+
+page = st.sidebar.radio(
+    "📁 Navigation",
+    [
+        "Material Selector",
+        "Literature Reviewer",
+        "Tensile Test Library",
+        "DSC Library",
+        "SEM & EDS Library",
+        "Fatigue Test Library",
+        "Production Tracker",
+    ],
+)
+
 # Seçilen menüye göre sayfaya yönlendirme
 if page == "Material Selector":
     st.switch_page("pages/1_Material_Selector.py")
