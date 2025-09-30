@@ -31,7 +31,8 @@ properties = [
     "Glass Transition Temperature (°C)",
     "Melting Temperature (°C)",
     "Processing Temperature (°C)",
-    "Injection Pressure (MPa)"
+    "Injection Pressure (MPa)",
+    "Maximum Service Temperature (°C)"
 ]
 
 # ---------------------------
@@ -53,7 +54,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (149, 160),
             "Melting Temperature (°C)": (300, 360),
             "Processing Temperature (°C)": (350, 400),
-            "Injection Pressure (MPa)": (103, 138)
+            "Injection Pressure (MPa)": (103, 138),
+            "Maximum Service Temperature (°C)": (228, 300)
         },
         "PEKK 20-40% CF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (9, 45),
@@ -69,7 +71,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (160, 160),
             "Melting Temperature (°C)": (302, 360),
             "Processing Temperature (°C)": (350, 400),
-            "Injection Pressure (MPa)": (103, 138)
+            "Injection Pressure (MPa)": (103, 138),
+            "Maximum Service Temperature (°C)": (228, 300)
         },
         "PEEK UNFILLED": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (40, 60),
@@ -85,7 +88,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (143, 143),
             "Melting Temperature (°C)": (334, 334),
             "Processing Temperature (°C)": (100, 290),
-            "Injection Pressure (MPa)": (82.7, 124)
+            "Injection Pressure (MPa)": (82.7, 124),
+            "Maximum Service Temperature (°C)": (269, 310)
         },
         "PEEK 30% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (15, 20),
@@ -101,7 +105,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (143, 143),
             "Melting Temperature (°C)": (334, 334),
             "Processing Temperature (°C)": (100, 287),
-            "Injection Pressure (MPa)": (6.9, 102)
+            "Injection Pressure (MPa)": (6.9, 102),
+            "Maximum Service Temperature (°C)": (265, 310)
         },
         "PEEK 30% CF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (15, 40),
@@ -117,7 +122,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (143, 143),
             "Melting Temperature (°C)": (334, 334),
             "Processing Temperature (°C)": (100, 310),
-            "Injection Pressure (MPa)": (82.7, 124)
+            "Injection Pressure (MPa)": (82.7, 124),
+            "Maximum Service Temperature (°C)": (272, 310)
         },
         "PEEK 5-60% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (3.24, 99.7),
@@ -133,7 +139,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (143, 178),
             "Melting Temperature (°C)": (334, 334),
             "Processing Temperature (°C)": (100, 287),
-            "Injection Pressure (MPa)": (6.9, 102)
+            "Injection Pressure (MPa)": (6.9, 102),
+            "Maximum Service Temperature (°C)": (265, 310)
         },
         "PEEK 10-60% CF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (1.80, 60.0),
@@ -149,7 +156,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (143, 170),
             "Melting Temperature (°C)": (334, 334),
             "Processing Temperature (°C)": (100, 294),
-            "Injection Pressure (MPa)": (82.7, 124)
+            "Injection Pressure (MPa)": (82.7, 124),
+            "Maximum Service Temperature (°C)": (272, 310)
         },
         "PEEK 5-45% PTFE": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (9.0, 65.0),
@@ -165,7 +173,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (143, 170),
             "Melting Temperature (°C)": (340, 385),
             "Processing Temperature (°C)": (100, 340),
-            "Injection Pressure (MPa)": (49.6, 124)
+            "Injection Pressure (MPa)": (49.6, 124),
+            "Maximum Service Temperature (°C)": (206, 310)
         },
         "PEEK ARAMID FIBER": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (5.0, 10.0),
@@ -181,7 +190,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (143, 170),
             "Melting Temperature (°C)": (349, 399),
             "Processing Temperature (°C)": (343, 388),
-            "Injection Pressure (MPa)": (82.7, 124)
+            "Injection Pressure (MPa)": (82.7, 124),
+            "Maximum Service Temperature (°C)": (265, 310)
         },
         "PESU UNFILLED": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (27, 60),
@@ -197,7 +207,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (210, 230),
             "Melting Temperature (°C)": (288, 410),
             "Processing Temperature (°C)": (80, 297),
-            "Injection Pressure (MPa)": (3.45, 103)
+            "Injection Pressure (MPa)": (3.45, 103),
+            "Maximum Service Temperature (°C)": (180, 220)
         },
         "PESU 10% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (25.0, 50.4),
@@ -213,7 +224,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (225, 225),
             "Melting Temperature (°C)": (340, 399),
             "Processing Temperature (°C)": (343, 366),
-            "Injection Pressure (MPa)": (68.9, 103)
+            "Injection Pressure (MPa)": (68.9, 103),
+            "Maximum Service Temperature (°C)": (180, 200)
         },
         "PESU 20% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (20.0, 39.6),
@@ -229,7 +241,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (225, 225),
             "Melting Temperature (°C)": (343, 390),
             "Processing Temperature (°C)": (80, 366),
-            "Injection Pressure (MPa)": (68.9, 103)
+            "Injection Pressure (MPa)": (68.9, 103),
+            "Maximum Service Temperature (°C)": (180, 220)
         },
         "PESU 30% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (15.0, 36.0),
@@ -245,7 +258,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (225, 225),
             "Melting Temperature (°C)": (343, 390),
             "Processing Temperature (°C)": (343, 366),
-            "Injection Pressure (MPa)": (68.9, 103)
+            "Injection Pressure (MPa)": (68.9, 103),
+            "Maximum Service Temperature (°C)": (185, 220)
         },
         "PPS UNFILLED": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (30, 50),
@@ -261,7 +275,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (88, 93),
             "Melting Temperature (°C)": (275, 290),
             "Processing Temperature (°C)": (20, 340),
-            "Injection Pressure (MPa)": (34.5, 103)
+            "Injection Pressure (MPa)": (34.5, 103),
+            "Maximum Service Temperature (°C)": (170, 260)
         },
         "PPS 10% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (10.00, 50.00),
@@ -277,7 +292,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (280, 285),
             "Processing Temperature (°C)": (288, 330),
-            "Injection Pressure (MPa)": (30, 103)
+            "Injection Pressure (MPa)": (30, 103),
+            "Maximum Service Temperature (°C)": (220, 260)
         },
         "PPS 20% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (12.0, 60.0),
@@ -293,7 +309,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (20, 340),
             "Processing Temperature (°C)": (20, 340),
-            "Injection Pressure (MPa)": (30, 103)
+            "Injection Pressure (MPa)": (30, 103),
+            "Maximum Service Temperature (°C)": (220, 260)
         },
         "PPS 30% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (9.00, 120),
@@ -309,7 +326,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (260, 282),
             "Processing Temperature (°C)": (20, 340),
-            "Injection Pressure (MPa)": (30, 103)
+            "Injection Pressure (MPa)": (30, 103),
+            "Maximum Service Temperature (°C)": (185, 260)
         },
         "PPS 40% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (10.00, 135),
@@ -325,7 +343,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (88, 90),
             "Melting Temperature (°C)": (278, 310),
             "Processing Temperature (°C)": (20, 350),
-            "Injection Pressure (MPa)": (30, 150)
+            "Injection Pressure (MPa)": (30, 150),
+            "Maximum Service Temperature (°C)": (180, 260)
         },
         "PPS 50% GF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (7.00, 45.00),
@@ -341,7 +360,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (280, 285),
             "Processing Temperature (°C)": (70, 340),
-            "Injection Pressure (MPa)": (30, 103)
+            "Injection Pressure (MPa)": (30, 103),
+            "Maximum Service Temperature (°C)": (180, 260)
         },
         "PPS 10% CF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (5.00, 32.00),
@@ -357,7 +377,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (278, 285),
             "Processing Temperature (°C)": (285, 350),
-            "Injection Pressure (MPa)": (30, 124)
+            "Injection Pressure (MPa)": (30, 124),
+            "Maximum Service Temperature (°C)": (185, 260)
         },
         "PPS 20% CF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (15.0, 20.0),
@@ -373,7 +394,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (278, 280),
             "Processing Temperature (°C)": (290, 343),
-            "Injection Pressure (MPa)": (68.9, 124)
+            "Injection Pressure (MPa)": (68.9, 124),
+            "Maximum Service Temperature (°C)": (200, 232)
         },
         "PPS 30% CF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (5.00, 20.00),
@@ -389,7 +411,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (278, 280),
             "Processing Temperature (°C)": (288, 340),
-            "Injection Pressure (MPa)": (30, 124)
+            "Injection Pressure (MPa)": (30, 124),
+            "Maximum Service Temperature (°C)": (180, 260)
         },
         "PPS 40% CF": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (5.0, 10.0),
@@ -405,7 +428,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (278, 280),
             "Processing Temperature (°C)": (288, 330),
-            "Injection Pressure (MPa)": (30, 103)
+            "Injection Pressure (MPa)": (30, 103),
+            "Maximum Service Temperature (°C)": (180, 260)
         },
         "PPS 10-40% CF + PTFE": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (9.00, 60.00),
@@ -421,7 +445,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 94),
             "Melting Temperature (°C)": (278, 281),
             "Processing Temperature (°C)": (288, 370),
-            "Injection Pressure (MPa)": (30, 103)
+            "Injection Pressure (MPa)": (30, 103),
+            "Maximum Service Temperature (°C)": (220, 260)
         },
         "PPS CONDUCTIVE": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (19.80, 19.80),
@@ -437,7 +462,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (280, 290),
             "Processing Temperature (°C)": (307, 329),
-            "Injection Pressure (MPa)": (68.9, 103)
+            "Injection Pressure (MPa)": (68.9, 103),
+            "Maximum Service Temperature (°C)": (180, 260)
         },
         "PPS 25-65% GF + MINERAL": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (10.00, 250.0),
@@ -453,7 +479,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (230, 285),
             "Processing Temperature (°C)": (20, 340),
-            "Injection Pressure (MPa)": (4.96, 150)
+            "Injection Pressure (MPa)": (4.96, 150),
+            "Maximum Service Temperature (°C)": (200, 260)
         },
         "PPS STAINLESS STEEL FIBER": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (20.0, 30.0),
@@ -469,7 +496,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (278, 280),
             "Processing Temperature (°C)": (307, 329),
-            "Injection Pressure (MPa)": (68.9, 103)
+            "Injection Pressure (MPa)": (68.9, 103),
+            "Maximum Service Temperature (°C)": (180, 260)
         },
         "PPS 10-50% GF + PTFE": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (10.8, 32.4),
@@ -485,7 +513,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (278, 284),
             "Processing Temperature (°C)": (288, 370),
-            "Injection Pressure (MPa)": (4.96, 124)
+            "Injection Pressure (MPa)": (4.96, 124),
+            "Maximum Service Temperature (°C)": (220, 260)
         },
         "PPS 10-70% PTFE": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (50.0, 100.0),
@@ -501,7 +530,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (278, 280),
             "Processing Temperature (°C)": (280, 343),
-            "Injection Pressure (MPa)": (30.0, 103)
+            "Injection Pressure (MPa)": (30.0, 103),
+            "Maximum Service Temperature (°C)": (180, 260)
         },
         "PPS 10-30% ARAMID FIBER": {
             "Coefficient of Thermal Expansion (CTE) (µstrain/°C)": (10.0, 15.0),
@@ -517,7 +547,8 @@ if "datasets" not in st.session_state:
             "Glass Transition Temperature (°C)": (90, 90),
             "Melting Temperature (°C)": (285, 343),
             "Processing Temperature (°C)": (140, 321),
-            "Injection Pressure (MPa)": (68.9, 138)
+            "Injection Pressure (MPa)": (68.9, 138),
+            "Maximum Service Temperature (°C)": (180, 260)
         }
     }
 
@@ -736,7 +767,8 @@ with tab3:
         "Glass Transition Temperature (°C)",
         "Melting Temperature (°C)",
         "Processing Temperature (°C)",
-        "Injection Pressure (MPa)"
+        "Injection Pressure (MPa)",
+        "Maximum Service Temperature (°C)"
     ]
 
     st.markdown("### 🔎 Property-Based Filtering")
