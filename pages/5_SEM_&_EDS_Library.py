@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import io
+import base64
 import shutil
 from pathlib import Path
 from datetime import datetime
@@ -22,16 +23,23 @@ st.title("SEM & EDS Library")
 # =========================
 # Gemini Ayarları (Opsiyonel)
 # =========================
-# - GEMINI_API_KEY ortam değişkeni veya sol kenar çubuğundan girilebilir
 st.sidebar.subheader("🤖 Gemini (Nitel Yorum)")
 default_key = os.getenv("GEMINI_API_KEY", "")
 gemini_key_input = st.sidebar.text_input(
-    "Gemini API Key (opsiyonel)", value=default_key, type="password", help="Ortam değişkeni GEMINI_API_KEY de kullanılabilir."
+    "Gemini API Key (opsiyonel)", value=default_key, type="password",
+    help="Ortam değişkeni GEMINI_API_KEY de kullanılabilir."
 )
 st.sidebar.caption("LLM çıktıları nitel yorum amaçlıdır; cihaz yazılımının kantitatif analizinin yerine geçmez.")
 
-MODEL_OPTIONS = ["gemini-1.5-flash", "gemini-1.5-pro"]
-model_name = st.sidebar.selectbox("Model", MODEL_OPTIONS, index=0)
+# Çoklu alias: Bazı SDK sürümlerinde 'models/' öneki ve farklı isimler gerekebilir.
+MODEL_OPTIONS = [
+    "models/gemini-1.5-flash",
+    "gemini-1.5-flash",
+    "models/gemini-1.5-pro",
+    "gemini-1.5-pro",
+    "gemini-pro",             # eski/evrensel fallback
+]
+model_choice = st.sidebar.selectbox("Model", MODEL_OPTIONS, index=0)
 
 # google-generativeai isteğe bağlı import (uygulama kırılsın istemiyoruz)
 GENAI_AVAILABLE = True
@@ -40,19 +48,56 @@ try:
 except Exception:
     GENAI_AVAILABLE = False
 
-def get_gemini_model():
-    """Gemini modelini hazırlar; anahtar yoksa veya kütüphane yoksa None döner."""
+def _configure_gemini():
+    """API anahtarı ve SDK mevcudiyetini kontrol eder."""
     if not GENAI_AVAILABLE:
         return None, "⚠️ `google-generativeai` yüklü değil. `pip install google-generativeai` ekleyin."
-    api_key = gemini_key_input.strip()
+    api_key = (gemini_key_input or "").strip()
     if not api_key:
         return None, "⚠️ Gemini API anahtarı girilmedi. Ortam değişkeni GEMINI_API_KEY veya sol kenar çubuğunu kullanın."
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
-        return model, None
+        return True, None
     except Exception as e:
         return None, f"⚠️ Gemini yapılandırması başarısız: {e}"
+
+def _pick_first_usable_model(candidate_names: List[str]):
+    """
+    Verilen model isimlerinden ilk çalışabileni döndürür.
+    Çalışabilirlik kontrolü için hafif bir 'count_tokens' çağrısı dener.
+    """
+    ok, err = _configure_gemini()
+    if not ok:
+        return None, err
+    for name in candidate_names:
+        try:
+            model = genai.GenerativeModel(name)
+            # Hızlı sağlık kontrolü: bazı sürümlerde count_tokens mevcut, yoksa generate_content ile çok kısa bir deneme yap.
+            try:
+                _ = model.count_tokens("ping")
+                return model, None
+            except Exception:
+                # Bazı sürümlerde count_tokens olmayabilir; kısa bir generate_content deneyelim.
+                resp = model.generate_content("ping")
+                if getattr(resp, "text", "").strip() != "":
+                    return model, None
+        except Exception:
+            continue
+    return None, "⚠️ Uygun bir Gemini modeli bulunamadı. Lütfen `google-generativeai` paketini güncelleyin veya başka bir model adı seçin."
+
+def _image_file_to_inline_part(image_path: Path) -> dict:
+    """Görseli base64 inline_data formatına çevirir (SDK ile uyumlu)."""
+    mime = "image/jpeg"
+    suffix = image_path.suffix.lower()
+    if suffix == ".png":
+        mime = "image/png"
+    elif suffix in [".tif", ".tiff"]:
+        mime = "image/tiff"
+    elif suffix == ".bmp":
+        mime = "image/bmp"
+    data = image_path.read_bytes()
+    b64 = base64.b64encode(data).decode("utf-8")
+    return {"inline_data": {"mime_type": mime, "data": b64}}
 
 # =========================
 # Kalıcı Depo
@@ -76,14 +121,11 @@ RECORD_COLUMNS = [
 def load_records() -> pd.DataFrame:
     if RECORDS_CSV.exists():
         df = pd.read_csv(RECORDS_CSV)
-        # Eksik kolonlar olursa düzelt
         for c in RECORD_COLUMNS:
             if c not in df.columns:
                 df[c] = ""
-        df = df[RECORD_COLUMNS]
-        return df
-    else:
-        return pd.DataFrame(columns=RECORD_COLUMNS)
+        return df[RECORD_COLUMNS]
+    return pd.DataFrame(columns=RECORD_COLUMNS)
 
 def save_records(df: pd.DataFrame):
     df.to_csv(RECORDS_CSV, index=False)
@@ -92,16 +134,11 @@ def safe_name(s: str) -> str:
     s = (s or "").strip()
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in s) or "entry"
 
-def bytes_from_file(path: Path) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
-
 records_df = load_records()
 
 # =========================
-# Gemini Yardımcıları
+# Gemini Prompt'ları
 # =========================
-
 SEM_PROMPT = """Aşağıdaki SEM görüntüsünü eklemeli imalat (FFF/PEEK/PEKK vb.) bağlamında
 nitel olarak bilimsel rapor üslubunda yorumla. Lütfen kısa başlıklarla akıcı bir metin üret:
 
@@ -138,25 +175,24 @@ Lütfen nitel (kantitatif olmayan) bir rapor hazırla:
 ÇIKTI: Bilimsel rapor üslubunda akıcı bir metin. Kantitatif wt%/at% verisi üretme; nitel kal.
 """
 
+def get_gemini_model_with_fallback():
+    """Seçili modelden başlayıp alias listesinde çalışır olanı bulur."""
+    # Kullanıcının seçtiği ilk, sonra kalanları dene (tekrarları filtreleyelim)
+    seen = set()
+    order = []
+    for n in [model_choice] + MODEL_OPTIONS:
+        if n not in seen:
+            seen.add(n)
+            order.append(n)
+    return _pick_first_usable_model(order)
+
 def sem_gemini_analyze(image_path: Path) -> str:
     """SEM görselini Gemini ile nitel yorumla."""
-    model, err = get_gemini_model()
+    model, err = get_gemini_model_with_fallback()
     if err:
         return err
     try:
-        # Görseli bytes olarak veriyoruz
-        mime = "image/jpeg"
-        suffix = image_path.suffix.lower()
-        if suffix in [".png"]:
-            mime = "image/png"
-        elif suffix in [".tif", ".tiff"]:
-            mime = "image/tiff"
-        elif suffix in [".bmp"]:
-            mime = "image/bmp"
-
-        image_bytes = bytes_from_file(image_path)
-        img_part = {"mime_type": mime, "data": image_bytes}
-
+        img_part = _image_file_to_inline_part(image_path)
         resp = model.generate_content(
             contents=[SEM_PROMPT, img_part],
             generation_config={"temperature": 0.7, "max_output_tokens": 1024},
@@ -171,19 +207,16 @@ def sem_gemini_analyze(image_path: Path) -> str:
 def summarize_dataframe_for_eds(df: pd.DataFrame, max_rows: int = 200) -> str:
     """EDS için DataFrame özetini metne dönüştür (ilk/son satırlar, sütunlar, basic istatistik)."""
     lines = []
-    lines.append(f"Şekil/Tablo Özeti: {len(df)} satır x {df.shape[1]} sütun")
+    lines.append(f"Tablo boyutu: {len(df)} satır x {df.shape[1]} sütun")
     lines.append("Sütunlar: " + ", ".join(map(str, df.columns.tolist()[:20])) + (" ..." if df.shape[1] > 20 else ""))
 
-    # örnekleme (ilk 5, son 5)
     head_part = df.head(5).to_csv(index=False)
     tail_part = df.tail(5).to_csv(index=False)
 
-    # çok büyükse kırp
-    sample_df = df.copy()
-    if len(sample_df) > max_rows:
+    sample_df = df
+    if len(df) > max_rows:
         sample_df = pd.concat([df.head(max_rows//2), df.tail(max_rows//2)], ignore_index=True)
 
-    # basit istatistik (numerik kolonlar)
     num_cols = sample_df.select_dtypes(include="number").columns.tolist()
     stats_part = ""
     if num_cols:
@@ -202,7 +235,7 @@ def summarize_dataframe_for_eds(df: pd.DataFrame, max_rows: int = 200) -> str:
 
 def eds_gemini_analyze_from_df(df: pd.DataFrame) -> str:
     """CSV/TXT DataFrame üzerinden Gemini ile nitel yorum al."""
-    model, err = get_gemini_model()
+    model, err = get_gemini_model_with_fallback()
     if err:
         return err
     try:
@@ -254,7 +287,6 @@ with st.form("sem_eds_form", clear_on_submit=True):
     submitted = st.form_submit_button("💾 Save Entry", type="primary")
 
 if submitted:
-    # Gerekli minimum doğrulama
     if not production_name:
         st.error("❗ Production Name is required.")
     else:
@@ -273,7 +305,6 @@ if submitted:
             saved_sem_paths.append(fp.relative_to(BASE_DIR))
 
         saved_eds_paths: List[Path] = []
-        # xlsx/docx/pdf dosyalarını da kaydet ama analizde metin/CSV öncelikli
         for f in eds_files or []:
             fp = eds_dir / safe_name(f.name)
             with open(fp, "wb") as out:
@@ -306,7 +337,6 @@ st.subheader("All SEM & EDS Records")
 if records_df.empty:
     st.info("No records yet.")
 else:
-    # Sondan başa doğru (yeni en üstte)
     for _, row in records_df.sort_values("created_at", ascending=False).iterrows():
         title_left = row["production_name"] or "—"
         title_right = row["project_name"] or ""
@@ -374,7 +404,6 @@ else:
                             cols[0].dataframe(df_preview.head(20), use_container_width=True)
                             shown = True
                         elif p.suffix.lower() == ".txt":
-                            # otomatik ayırıcı tespiti
                             df_preview = pd.read_csv(p, sep=None, engine="python")
                             cols[0].dataframe(df_preview.head(20), use_container_width=True)
                             shown = True
@@ -403,7 +432,6 @@ else:
                             if df_preview is not None and not df_preview.empty:
                                 result = eds_gemini_analyze_from_df(df_preview)
                             else:
-                                # CSV/TXT dışı veya okuyamadıysak yalnızca dosya adını rapora ekleyelim
                                 result = (
                                     "⚠️ CSV/TXT veri önizlemesi bulunamadı. EDS nitel yorumu için lütfen CSV/TXT dosyası yükleyin.\n"
                                     "PDF/DOCX doğrudan analiz edilmez; üretici yazılımından alınmış tabloyu CSV olarak ekleyin."
@@ -414,7 +442,6 @@ else:
             # Silme butonu
             del_col = st.columns([1, 4])[0]
             if del_col.button("🗑️ Delete This Entry", key=f"del_{row['entry_id']}"):
-                # Klasörü ve kayıt satırını sil
                 try:
                     shutil.rmtree(BASE_DIR / row["entry_id"], ignore_errors=True)
                 except Exception as e:
