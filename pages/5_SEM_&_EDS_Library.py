@@ -5,7 +5,7 @@ import io
 import shutil
 from pathlib import Path
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 # =========================
 # Sayfa / Erişim Ayarları
@@ -18,6 +18,41 @@ if "authenticated" in st.session_state and not st.session_state.authenticated:
     st.stop()
 
 st.title("SEM & EDS Library")
+
+# =========================
+# Gemini Ayarları (Opsiyonel)
+# =========================
+# - GEMINI_API_KEY ortam değişkeni veya sol kenar çubuğundan girilebilir
+st.sidebar.subheader("🤖 Gemini (Nitel Yorum)")
+default_key = os.getenv("GEMINI_API_KEY", "")
+gemini_key_input = st.sidebar.text_input(
+    "Gemini API Key (opsiyonel)", value=default_key, type="password", help="Ortam değişkeni GEMINI_API_KEY de kullanılabilir."
+)
+st.sidebar.caption("LLM çıktıları nitel yorum amaçlıdır; cihaz yazılımının kantitatif analizinin yerine geçmez.")
+
+MODEL_OPTIONS = ["gemini-1.5-flash", "gemini-1.5-pro"]
+model_name = st.sidebar.selectbox("Model", MODEL_OPTIONS, index=0)
+
+# google-generativeai isteğe bağlı import (uygulama kırılsın istemiyoruz)
+GENAI_AVAILABLE = True
+try:
+    import google.generativeai as genai
+except Exception:
+    GENAI_AVAILABLE = False
+
+def get_gemini_model():
+    """Gemini modelini hazırlar; anahtar yoksa veya kütüphane yoksa None döner."""
+    if not GENAI_AVAILABLE:
+        return None, "⚠️ `google-generativeai` yüklü değil. `pip install google-generativeai` ekleyin."
+    api_key = gemini_key_input.strip()
+    if not api_key:
+        return None, "⚠️ Gemini API anahtarı girilmedi. Ortam değişkeni GEMINI_API_KEY veya sol kenar çubuğunu kullanın."
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        return model, None
+    except Exception as e:
+        return None, f"⚠️ Gemini yapılandırması başarısız: {e}"
 
 # =========================
 # Kalıcı Depo
@@ -62,6 +97,126 @@ def bytes_from_file(path: Path) -> bytes:
         return f.read()
 
 records_df = load_records()
+
+# =========================
+# Gemini Yardımcıları
+# =========================
+
+SEM_PROMPT = """Aşağıdaki SEM görüntüsünü eklemeli imalat (FFF/PEEK/PEKK vb.) bağlamında
+nitel olarak bilimsel rapor üslubunda yorumla. Lütfen kısa başlıklarla akıcı bir metin üret:
+
+1) Katman Yapısı ve Morfoloji:
+- Katmanların görünürlüğü, süreksizlikler, yüzey pürüzlülüğü, olası yöney/kılcal izler
+- Katman kalınlıklarının farklılaşması için olası nedenler (eriyik yığılma, viskoz akış sapmaları, soğuma)
+
+2) Bağlanma ve Boşluklar:
+- Katmanlar arası boşluk/void/çekinti gözlemi (var/yok, göreli görünüm)
+- Bağlanma başarımı hakkında nitel değerlendirme
+
+3) Kusur ve Artefaktlar:
+- Gözlenen olası kusurlar (delaminasyon, gözeneklilik, partikül, çekme izleri vb.) ve muhtemel kaynakları
+
+4) Mekanik Özelliklerle İlişki:
+- Gözlenen mikroyapının, çekme/çekme dayanımı vb. makro davranışla nitel ilişkisi
+
+5) Sınırlar:
+- Ölçek çubuğu/büyütme bilgisi yoksa belirsizlikleri belirt; bu yorumlar nitel, kantitatif değildir.
+
+ÇIKTI: Tamamı akıcı bir rapor metni olsun (madde madde değil), ama içinde bu başlıkların içeriğini kapsasın.
+Kantitatif değer uydurma; yalnızca görüntüden çıkarılabilecek nitel gözlemleri yaz.
+"""
+
+EDS_PROMPT = """Aşağıda EDS verisinin özeti veriliyor. Bu özet, CSV/TXT verisinden türetilmiştir.
+Lütfen nitel (kantitatif olmayan) bir rapor hazırla:
+
+- Baskın element/çizgi adayları ve göreli dağılıma dair nitel yorum
+- Matris ve muhtemel faz/ara yüzey ilişkileri
+- Numune hazırlama kaynaklı artefakt olasılıkları (kaplama, yükleme, yüzey eğimi, topoğrafya etkisi)
+- Hata/kısıtlar: ZAF/φρz düzeltmesi yokluğu, standardizasyon eksikliği, dedeksiyon limitleri, pik çakışmaları
+- SEM gözlemleriyle bağ kurulabiliyorsa kısaca ilişkilendir
+
+ÇIKTI: Bilimsel rapor üslubunda akıcı bir metin. Kantitatif wt%/at% verisi üretme; nitel kal.
+"""
+
+def sem_gemini_analyze(image_path: Path) -> str:
+    """SEM görselini Gemini ile nitel yorumla."""
+    model, err = get_gemini_model()
+    if err:
+        return err
+    try:
+        # Görseli bytes olarak veriyoruz
+        mime = "image/jpeg"
+        suffix = image_path.suffix.lower()
+        if suffix in [".png"]:
+            mime = "image/png"
+        elif suffix in [".tif", ".tiff"]:
+            mime = "image/tiff"
+        elif suffix in [".bmp"]:
+            mime = "image/bmp"
+
+        image_bytes = bytes_from_file(image_path)
+        img_part = {"mime_type": mime, "data": image_bytes}
+
+        resp = model.generate_content(
+            contents=[SEM_PROMPT, img_part],
+            generation_config={"temperature": 0.7, "max_output_tokens": 1024},
+        )
+        text = getattr(resp, "text", None) or ""
+        if not text.strip():
+            return "⚠️ Modelden boş yanıt geldi."
+        return "⚠️ Not: Bu yorumlar LLM tarafından üretilmiş nitel değerlendirmelerdir; cihaz yazılımının kantitatif analizinin yerine geçmez.\n\n" + text
+    except Exception as e:
+        return f"⚠️ Gemini isteği başarısız: {e}"
+
+def summarize_dataframe_for_eds(df: pd.DataFrame, max_rows: int = 200) -> str:
+    """EDS için DataFrame özetini metne dönüştür (ilk/son satırlar, sütunlar, basic istatistik)."""
+    lines = []
+    lines.append(f"Şekil/Tablo Özeti: {len(df)} satır x {df.shape[1]} sütun")
+    lines.append("Sütunlar: " + ", ".join(map(str, df.columns.tolist()[:20])) + (" ..." if df.shape[1] > 20 else ""))
+
+    # örnekleme (ilk 5, son 5)
+    head_part = df.head(5).to_csv(index=False)
+    tail_part = df.tail(5).to_csv(index=False)
+
+    # çok büyükse kırp
+    sample_df = df.copy()
+    if len(sample_df) > max_rows:
+        sample_df = pd.concat([df.head(max_rows//2), df.tail(max_rows//2)], ignore_index=True)
+
+    # basit istatistik (numerik kolonlar)
+    num_cols = sample_df.select_dtypes(include="number").columns.tolist()
+    stats_part = ""
+    if num_cols:
+        stats = sample_df[num_cols].describe().to_csv()
+        stats_part = f"\nBasit istatistik (kırpılmış veri, numerik kolonlar):\n{stats}"
+
+    summary = (
+        "\n".join(lines)
+        + "\n\nİlk 5 satır (CSV):\n"
+        + head_part
+        + "\nSon 5 satır (CSV):\n"
+        + tail_part
+        + stats_part
+    )
+    return summary
+
+def eds_gemini_analyze_from_df(df: pd.DataFrame) -> str:
+    """CSV/TXT DataFrame üzerinden Gemini ile nitel yorum al."""
+    model, err = get_gemini_model()
+    if err:
+        return err
+    try:
+        summary = summarize_dataframe_for_eds(df)
+        resp = model.generate_content(
+            contents=[EDS_PROMPT, f"\n\n=== EDS VERİ ÖZETİ ===\n{summary}\n"],
+            generation_config={"temperature": 0.6, "max_output_tokens": 1024},
+        )
+        text = getattr(resp, "text", None) or ""
+        if not text.strip():
+            return "⚠️ Modelden boş yanıt geldi."
+        return "⚠️ Not: Bu yorumlar LLM tarafından üretilmiş nitel değerlendirmelerdir; cihaz yazılımının kantitatif analizinin yerine geçmez.\n\n" + text
+    except Exception as e:
+        return f"⚠️ Gemini isteği başarısız: {e}"
 
 # =========================
 # Yeni Kayıt Formu
@@ -118,6 +273,7 @@ if submitted:
             saved_sem_paths.append(fp.relative_to(BASE_DIR))
 
         saved_eds_paths: List[Path] = []
+        # xlsx/docx/pdf dosyalarını da kaydet ama analizde metin/CSV öncelikli
         for f in eds_files or []:
             fp = eds_dir / safe_name(f.name)
             with open(fp, "wb") as out:
@@ -172,11 +328,11 @@ else:
                 st.markdown(f"**EDS Files:** {len(eds_list)}")
 
             st.markdown("—")
-            # SEM dosyaları: küçük önizleme + indirme
+            # SEM dosyaları: küçük önizleme + indirme + Gemini Yorum
             if sem_list:
                 st.markdown("**SEM Files**")
                 for p in sem_list:
-                    cols = st.columns([3, 1])
+                    cols = st.columns([3, 1, 1])
                     try:
                         if p.suffix.lower() in [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"]:
                             cols[0].image(str(p), caption=p.name, use_container_width=True)
@@ -185,39 +341,74 @@ else:
                     except Exception as e:
                         cols[0].warning(f"Preview error: {e}")
 
-                    with open(p, "rb") as fh:
-                        cols[1].download_button(
-                            "⬇️ Download",
-                            data=fh.read(),
-                            file_name=p.name,
-                            mime=None,
-                            key=f"dl_sem_{row['entry_id']}_{p.name}",
-                        )
+                    # İndir
+                    try:
+                        with open(p, "rb") as fh:
+                            cols[1].download_button(
+                                "⬇️ Download",
+                                data=fh.read(),
+                                file_name=p.name,
+                                mime=None,
+                                key=f"dl_sem_{row['entry_id']}_{p.name}",
+                            )
+                    except Exception as e:
+                        cols[1].warning(f"Download error: {e}")
 
-            # EDS dosyaları: liste + indirme (CSV/TXT küçük tablo önizleme)
+                    # Gemini nitel yorum
+                    analyze_key = f"an_sem_{row['entry_id']}_{p.name}"
+                    if cols[2].button("🤖 Yorumla", key=analyze_key):
+                        with st.spinner("Gemini nitel yorumu hazırlanıyor..."):
+                            result = sem_gemini_analyze(p)
+                        st.info(result)
+
+            # EDS dosyaları: liste + indirme + önizleme (CSV/TXT küçük tablo) + Gemini Yorum
             if eds_list:
                 st.markdown("**EDS Files**")
                 for p in eds_list:
-                    cols = st.columns([3, 1])
+                    cols = st.columns([3, 1, 1])
                     shown = False
+                    df_preview: Optional[pd.DataFrame] = None
                     try:
-                        if p.suffix.lower() in [".csv", ".txt"]:
-                            df_preview = pd.read_csv(p) if p.suffix.lower() == ".csv" else pd.read_csv(p, sep=None, engine="python")
+                        if p.suffix.lower() == ".csv":
+                            df_preview = pd.read_csv(p)
                             cols[0].dataframe(df_preview.head(20), use_container_width=True)
                             shown = True
-                    except Exception:
-                        pass
+                        elif p.suffix.lower() == ".txt":
+                            # otomatik ayırıcı tespiti
+                            df_preview = pd.read_csv(p, sep=None, engine="python")
+                            cols[0].dataframe(df_preview.head(20), use_container_width=True)
+                            shown = True
+                    except Exception as e:
+                        cols[0].warning(f"Preview error: {e}")
                     if not shown:
                         cols[0].write(p.name)
 
-                    with open(p, "rb") as fh:
-                        cols[1].download_button(
-                            "⬇️ Download",
-                            data=fh.read(),
-                            file_name=p.name,
-                            mime=None,
-                            key=f"dl_eds_{row['entry_id']}_{p.name}",
-                        )
+                    # İndir
+                    try:
+                        with open(p, "rb") as fh:
+                            cols[1].download_button(
+                                "⬇️ Download",
+                                data=fh.read(),
+                                file_name=p.name,
+                                mime=None,
+                                key=f"dl_eds_{row['entry_id']}_{p.name}",
+                            )
+                    except Exception as e:
+                        cols[1].warning(f"Download error: {e}")
+
+                    # Gemini nitel yorum
+                    analyze_key = f"an_eds_{row['entry_id']}_{p.name}"
+                    if cols[2].button("🤖 Yorumla", key=analyze_key):
+                        with st.spinner("Gemini nitel yorumu hazırlanıyor..."):
+                            if df_preview is not None and not df_preview.empty:
+                                result = eds_gemini_analyze_from_df(df_preview)
+                            else:
+                                # CSV/TXT dışı veya okuyamadıysak yalnızca dosya adını rapora ekleyelim
+                                result = (
+                                    "⚠️ CSV/TXT veri önizlemesi bulunamadı. EDS nitel yorumu için lütfen CSV/TXT dosyası yükleyin.\n"
+                                    "PDF/DOCX doğrudan analiz edilmez; üretici yazılımından alınmış tabloyu CSV olarak ekleyin."
+                                )
+                        st.info(result)
 
             st.markdown("—")
             # Silme butonu
@@ -233,6 +424,3 @@ else:
                 save_records(new_df)
                 st.success("Entry deleted.")
                 st.rerun()
-
-
-
