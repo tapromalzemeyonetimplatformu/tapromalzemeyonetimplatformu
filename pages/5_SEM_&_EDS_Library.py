@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import os
-import io
 import base64
 import shutil
 from pathlib import Path
@@ -13,7 +12,6 @@ from typing import List, Optional
 # =========================
 st.set_page_config(page_title="SEM & EDS Library", page_icon="🧪", layout="wide")
 
-# (Uygulamanızda giriş kontrolü varsa, DSC/Production ile uyumlu tutalım)
 if "authenticated" in st.session_state and not st.session_state.authenticated:
     st.error("🔒 You must be logged in to access this page.")
     st.stop()
@@ -21,83 +19,123 @@ if "authenticated" in st.session_state and not st.session_state.authenticated:
 st.title("SEM & EDS Library")
 
 # =========================
-# Gemini Ayarları (Opsiyonel)
+# Gemini Ayarları (Dinamik)
 # =========================
 st.sidebar.subheader("🤖 Gemini (Nitel Yorum)")
 default_key = os.getenv("GEMINI_API_KEY", "")
 gemini_key_input = st.sidebar.text_input(
-    "Gemini API Key (opsiyonel)", value=default_key, type="password",
+    "Gemini API Key", value=default_key, type="password",
     help="Ortam değişkeni GEMINI_API_KEY de kullanılabilir."
 )
 st.sidebar.caption("LLM çıktıları nitel yorum amaçlıdır; cihaz yazılımının kantitatif analizinin yerine geçmez.")
 
-# Çoklu alias: Bazı SDK sürümlerinde 'models/' öneki ve farklı isimler gerekebilir.
-MODEL_OPTIONS = [
-    "models/gemini-1.5-flash",
-    "gemini-1.5-flash",
-    "models/gemini-1.5-pro",
-    "gemini-1.5-pro",
-    "gemini-pro",             # eski/evrensel fallback
-]
-model_choice = st.sidebar.selectbox("Model", MODEL_OPTIONS, index=0)
-
-# google-generativeai isteğe bağlı import (uygulama kırılsın istemiyoruz)
+# google-generativeai isteğe bağlı import
 GENAI_AVAILABLE = True
 try:
     import google.generativeai as genai
 except Exception:
     GENAI_AVAILABLE = False
 
-def _configure_gemini():
-    """API anahtarı ve SDK mevcudiyetini kontrol eder."""
+@st.cache_resource(show_spinner=False)
+def list_gemini_models(api_key: str) -> List[str]:
+    """Kullanıcının key’i ile erişebildiği ve generateContent destekleyen model adlarını döndürür."""
+    if not GENAI_AVAILABLE or not api_key:
+        return []
+    try:
+        genai.configure(api_key=api_key)
+        names = []
+        for m in genai.list_models():
+            methods = getattr(m, "supported_generation_methods", []) or getattr(m, "generation_methods", [])
+            # Farklı SDK sürümlerine uyumlu kontrol
+            methods = [str(x).lower() for x in methods]
+            if any("generatecontent" in x for x in methods) or "generateContent" in methods:
+                names.append(m.name)
+        # Örnek: ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'gemini-pro', ...]
+        return sorted(set(names))
+    except Exception:
+        return []
+
+def configure_gemini(api_key: str):
     if not GENAI_AVAILABLE:
-        return None, "⚠️ `google-generativeai` yüklü değil. `pip install google-generativeai` ekleyin."
-    api_key = (gemini_key_input or "").strip()
+        return False, "⚠️ `google-generativeai` kurulu değil. `pip install google-generativeai`"
     if not api_key:
-        return None, "⚠️ Gemini API anahtarı girilmedi. Ortam değişkeni GEMINI_API_KEY veya sol kenar çubuğunu kullanın."
+        return False, "⚠️ Gemini API anahtarı yok. Sidebar’dan girin veya GEMINI_API_KEY ortam değişkenini ayarlayın."
     try:
         genai.configure(api_key=api_key)
         return True, None
     except Exception as e:
-        return None, f"⚠️ Gemini yapılandırması başarısız: {e}"
+        return False, f"⚠️ Gemini yapılandırması başarısız: {e}"
 
-def _pick_first_usable_model(candidate_names: List[str]):
+def try_model_variants(name: str):
     """
-    Verilen model isimlerinden ilk çalışabileni döndürür.
-    Çalışabilirlik kontrolü için hafif bir 'count_tokens' çağrısı dener.
+    Seçilen model adı için çalışır varyasyonu bul:
+    - verilen ad
+    - 'models/' önekli
+    - '-latest' ekli
+    - hem önek hem ek
     """
-    ok, err = _configure_gemini()
+    variants = []
+    base = name.strip()
+    if not base:
+        return []
+    variants.append(base)
+    if not base.startswith("models/"):
+        variants.append(f"models/{base}")
+    if not base.endswith("-latest"):
+        variants.append(f"{base}-latest")
+    if not base.startswith("models/") and not base.endswith("-latest"):
+        variants.append(f"models/{base}-latest")
+    return list(dict.fromkeys(variants))  # benzersiz sırayı koru
+
+def pick_working_model(api_key: str, preferred: Optional[str], discovered: List[str]):
+    """
+    1) Kullanıcı seçimi varsa onun varyantlarını sırayla dene
+    2) Olmazsa discovered listesindeki modelleri sırayla dene
+    """
+    ok, err = configure_gemini(api_key)
     if not ok:
         return None, err
-    for name in candidate_names:
+
+    candidates: List[str] = []
+    if preferred:
+        candidates.extend(try_model_variants(preferred))
+    # discovered isimleri de (varsa) ekle
+    for m in discovered:
+        candidates.extend(try_model_variants(m))
+    # son çare olarak bilinen isimler
+    candidates.extend([
+        *try_model_variants("gemini-1.5-flash"),
+        *try_model_variants("gemini-1.5-pro"),
+        *try_model_variants("gemini-pro"),
+    ])
+    # tekrarları at
+    seen = set()
+    ordered = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+
+    # hızlı sağlık kontrolü: kısa generate_content denemesi
+    for name in ordered:
         try:
             model = genai.GenerativeModel(name)
-            # Hızlı sağlık kontrolü: bazı sürümlerde count_tokens mevcut, yoksa generate_content ile çok kısa bir deneme yap.
-            try:
-                _ = model.count_tokens("ping")
+            resp = model.generate_content("ping")
+            if getattr(resp, "text", "").strip() != "":
                 return model, None
-            except Exception:
-                # Bazı sürümlerde count_tokens olmayabilir; kısa bir generate_content deneyelim.
-                resp = model.generate_content("ping")
-                if getattr(resp, "text", "").strip() != "":
-                    return model, None
         except Exception:
             continue
-    return None, "⚠️ Uygun bir Gemini modeli bulunamadı. Lütfen `google-generativeai` paketini güncelleyin veya başka bir model adı seçin."
+    return None, "⚠️ Uygun bir Gemini modeli bulunamadı. Lütfen `google-generativeai` paketini güncelleyin veya farklı bir model deneyin."
 
-def _image_file_to_inline_part(image_path: Path) -> dict:
-    """Görseli base64 inline_data formatına çevirir (SDK ile uyumlu)."""
-    mime = "image/jpeg"
-    suffix = image_path.suffix.lower()
-    if suffix == ".png":
-        mime = "image/png"
-    elif suffix in [".tif", ".tiff"]:
-        mime = "image/tiff"
-    elif suffix == ".bmp":
-        mime = "image/bmp"
-    data = image_path.read_bytes()
-    b64 = base64.b64encode(data).decode("utf-8")
-    return {"inline_data": {"mime_type": mime, "data": b64}}
+# Sidebar: dinamik model listesi
+available = list_gemini_models(gemini_key_input.strip())
+if available:
+    selected_model = st.sidebar.selectbox("Model (erişilebilir)", available, index=0)
+else:
+    selected_model = st.sidebar.text_input(
+        "Model adı (manuel)", value="gemini-1.5-flash",
+        help="Örn: gemini-1.5-flash, gemini-1.5-pro, gemini-pro veya list_models ile dönen ad."
+    )
 
 # =========================
 # Kalıcı Depo
@@ -107,15 +145,8 @@ RECORDS_CSV = Path("sem_eds_records.csv")
 BASE_DIR.mkdir(exist_ok=True, parents=True)
 
 RECORD_COLUMNS = [
-    "entry_id",          # benzersiz klasör adı
-    "production_name",
-    "project_name",      # CREDIT / COMPADDITIVE
-    "producer",
-    "sample_no",
-    "test_date",         # YYYY-MM-DD
-    "sem_files",         # ; ile ayrılmış göreli yollar
-    "eds_files",         # ; ile ayrılmış göreli yollar
-    "created_at",
+    "entry_id", "production_name", "project_name", "producer",
+    "sample_no", "test_date", "sem_files", "eds_files", "created_at",
 ]
 
 def load_records() -> pd.DataFrame:
@@ -137,7 +168,7 @@ def safe_name(s: str) -> str:
 records_df = load_records()
 
 # =========================
-# Gemini Prompt'ları
+# Prompt'lar
 # =========================
 SEM_PROMPT = """Aşağıdaki SEM görüntüsünü eklemeli imalat (FFF/PEEK/PEKK vb.) bağlamında
 nitel olarak bilimsel rapor üslubunda yorumla. Lütfen kısa başlıklarla akıcı bir metin üret:
@@ -175,76 +206,59 @@ Lütfen nitel (kantitatif olmayan) bir rapor hazırla:
 ÇIKTI: Bilimsel rapor üslubunda akıcı bir metin. Kantitatif wt%/at% verisi üretme; nitel kal.
 """
 
-def get_gemini_model_with_fallback():
-    """Seçili modelden başlayıp alias listesinde çalışır olanı bulur."""
-    # Kullanıcının seçtiği ilk, sonra kalanları dene (tekrarları filtreleyelim)
-    seen = set()
-    order = []
-    for n in [model_choice] + MODEL_OPTIONS:
-        if n not in seen:
-            seen.add(n)
-            order.append(n)
-    return _pick_first_usable_model(order)
+# =========================
+# Yardımcılar (Gemini)
+# =========================
+def image_to_inline_part(path: Path) -> dict:
+    mime = "image/jpeg"
+    s = path.suffix.lower()
+    if s == ".png":
+        mime = "image/png"
+    elif s in [".tif", ".tiff"]:
+        mime = "image/tiff"
+    elif s == ".bmp":
+        mime = "image/bmp"
+    data_b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
+    return {"inline_data": {"mime_type": mime, "data": data_b64}}
+
+def get_working_model():
+    return pick_working_model(gemini_key_input.strip(), selected_model, available)
 
 def sem_gemini_analyze(image_path: Path) -> str:
-    """SEM görselini Gemini ile nitel yorumla."""
-    model, err = get_gemini_model_with_fallback()
+    model, err = get_working_model()
     if err:
         return err
     try:
-        img_part = _image_file_to_inline_part(image_path)
-        resp = model.generate_content(
-            contents=[SEM_PROMPT, img_part],
-            generation_config={"temperature": 0.7, "max_output_tokens": 1024},
-        )
-        text = getattr(resp, "text", None) or ""
+        part = image_to_inline_part(image_path)
+        resp = model.generate_content([SEM_PROMPT, part], generation_config={"temperature": 0.7, "max_output_tokens": 1024})
+        text = getattr(resp, "text", "") or ""
         if not text.strip():
             return "⚠️ Modelden boş yanıt geldi."
         return "⚠️ Not: Bu yorumlar LLM tarafından üretilmiş nitel değerlendirmelerdir; cihaz yazılımının kantitatif analizinin yerine geçmez.\n\n" + text
     except Exception as e:
         return f"⚠️ Gemini isteği başarısız: {e}"
 
-def summarize_dataframe_for_eds(df: pd.DataFrame, max_rows: int = 200) -> str:
-    """EDS için DataFrame özetini metne dönüştür (ilk/son satırlar, sütunlar, basic istatistik)."""
-    lines = []
-    lines.append(f"Tablo boyutu: {len(df)} satır x {df.shape[1]} sütun")
-    lines.append("Sütunlar: " + ", ".join(map(str, df.columns.tolist()[:20])) + (" ..." if df.shape[1] > 20 else ""))
-
-    head_part = df.head(5).to_csv(index=False)
-    tail_part = df.tail(5).to_csv(index=False)
-
-    sample_df = df
-    if len(df) > max_rows:
-        sample_df = pd.concat([df.head(max_rows//2), df.tail(max_rows//2)], ignore_index=True)
-
-    num_cols = sample_df.select_dtypes(include="number").columns.tolist()
+def summarize_df_for_eds(df: pd.DataFrame, max_rows: int = 200) -> str:
+    lines = [f"Tablo boyutu: {len(df)} satır x {df.shape[1]} sütun",
+             "Sütunlar: " + ", ".join(map(str, df.columns.tolist()[:20])) + (" ..." if df.shape[1] > 20 else "")]
+    head_csv = df.head(5).to_csv(index=False)
+    tail_csv = df.tail(5).to_csv(index=False)
+    sample = df if len(df) <= max_rows else pd.concat([df.head(max_rows//2), df.tail(max_rows//2)], ignore_index=True)
+    num_cols = sample.select_dtypes(include="number").columns.tolist()
     stats_part = ""
     if num_cols:
-        stats = sample_df[num_cols].describe().to_csv()
-        stats_part = f"\nBasit istatistik (kırpılmış veri, numerik kolonlar):\n{stats}"
-
-    summary = (
-        "\n".join(lines)
-        + "\n\nİlk 5 satır (CSV):\n"
-        + head_part
-        + "\nSon 5 satır (CSV):\n"
-        + tail_part
-        + stats_part
-    )
-    return summary
+        stats_part = "\nBasit istatistik (kırpılmış veri):\n" + sample[num_cols].describe().to_csv()
+    return "\n".join(lines) + "\n\nİlk 5 satır (CSV):\n" + head_csv + "\nSon 5 satır (CSV):\n" + tail_csv + stats_part
 
 def eds_gemini_analyze_from_df(df: pd.DataFrame) -> str:
-    """CSV/TXT DataFrame üzerinden Gemini ile nitel yorum al."""
-    model, err = get_gemini_model_with_fallback()
+    model, err = get_working_model()
     if err:
         return err
     try:
-        summary = summarize_dataframe_for_eds(df)
-        resp = model.generate_content(
-            contents=[EDS_PROMPT, f"\n\n=== EDS VERİ ÖZETİ ===\n{summary}\n"],
-            generation_config={"temperature": 0.6, "max_output_tokens": 1024},
-        )
-        text = getattr(resp, "text", None) or ""
+        summary = summarize_df_for_eds(df)
+        resp = model.generate_content([EDS_PROMPT, f"\n\n=== EDS VERİ ÖZETİ ===\n{summary}\n"],
+                                      generation_config={"temperature": 0.6, "max_output_tokens": 1024})
+        text = getattr(resp, "text", "") or ""
         if not text.strip():
             return "⚠️ Modelden boş yanıt geldi."
         return "⚠️ Not: Bu yorumlar LLM tarafından üretilmiş nitel değerlendirmelerdir; cihaz yazılımının kantitatif analizinin yerine geçmez.\n\n" + text
@@ -255,7 +269,6 @@ def eds_gemini_analyze_from_df(df: pd.DataFrame) -> str:
 # Yeni Kayıt Formu
 # =========================
 st.subheader("➕ Create New SEM & EDS Entry")
-
 with st.form("sem_eds_form", clear_on_submit=True):
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -267,22 +280,13 @@ with st.form("sem_eds_form", clear_on_submit=True):
         test_date = st.date_input("Test Date", value=datetime.now().date(), format="YYYY-MM-DD")
 
     st.markdown("**SEM Files Upload** (multiple)")
-    sem_files = st.file_uploader(
-        "Upload SEM files (images or PDFs)",
-        type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"],
-        accept_multiple_files=True,
-        key="sem_uploader",
-        label_visibility="collapsed",
-    )
-
+    sem_files = st.file_uploader("Upload SEM files (images or PDFs)",
+                                 type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"],
+                                 accept_multiple_files=True, key="sem_uploader", label_visibility="collapsed")
     st.markdown("**EDS Files Upload** (multiple)")
-    eds_files = st.file_uploader(
-        "Upload EDS files (csv, txt, xlsx, pdf, docx)",
-        type=["csv", "txt", "xlsx", "pdf", "docx"],
-        accept_multiple_files=True,
-        key="eds_uploader",
-        label_visibility="collapsed",
-    )
+    eds_files = st.file_uploader("Upload EDS files (csv, txt, xlsx, pdf, docx)",
+                                 type=["csv", "txt", "xlsx", "pdf", "docx"],
+                                 accept_multiple_files=True, key="eds_uploader", label_visibility="collapsed")
 
     submitted = st.form_submit_button("💾 Save Entry", type="primary")
 
@@ -322,7 +326,6 @@ if submitted:
             "eds_files": ";".join(str(p) for p in saved_eds_paths),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-
         records_df = pd.concat([records_df, pd.DataFrame([new_row])], ignore_index=True)
         save_records(records_df)
         st.success("✅ Entry saved successfully.")
@@ -358,7 +361,7 @@ else:
                 st.markdown(f"**EDS Files:** {len(eds_list)}")
 
             st.markdown("—")
-            # SEM dosyaları: küçük önizleme + indirme + Gemini Yorum
+            # SEM
             if sem_list:
                 st.markdown("**SEM Files**")
                 for p in sem_list:
@@ -370,28 +373,18 @@ else:
                             cols[0].write(p.name)
                     except Exception as e:
                         cols[0].warning(f"Preview error: {e}")
-
-                    # İndir
                     try:
                         with open(p, "rb") as fh:
-                            cols[1].download_button(
-                                "⬇️ Download",
-                                data=fh.read(),
-                                file_name=p.name,
-                                mime=None,
-                                key=f"dl_sem_{row['entry_id']}_{p.name}",
-                            )
+                            cols[1].download_button("⬇️ Download", data=fh.read(), file_name=p.name, mime=None,
+                                                    key=f"dl_sem_{row['entry_id']}_{p.name}")
                     except Exception as e:
                         cols[1].warning(f"Download error: {e}")
 
-                    # Gemini nitel yorum
-                    analyze_key = f"an_sem_{row['entry_id']}_{p.name}"
-                    if cols[2].button("🤖 Yorumla", key=analyze_key):
+                    if cols[2].button("🤖 Yorumla", key=f"an_sem_{row['entry_id']}_{p.name}"):
                         with st.spinner("Gemini nitel yorumu hazırlanıyor..."):
-                            result = sem_gemini_analyze(p)
-                        st.info(result)
+                            st.info(sem_gemini_analyze(p))
 
-            # EDS dosyaları: liste + indirme + önizleme (CSV/TXT küçük tablo) + Gemini Yorum
+            # EDS
             if eds_list:
                 st.markdown("**EDS Files**")
                 for p in eds_list:
@@ -412,41 +405,30 @@ else:
                     if not shown:
                         cols[0].write(p.name)
 
-                    # İndir
                     try:
                         with open(p, "rb") as fh:
-                            cols[1].download_button(
-                                "⬇️ Download",
-                                data=fh.read(),
-                                file_name=p.name,
-                                mime=None,
-                                key=f"dl_eds_{row['entry_id']}_{p.name}",
-                            )
+                            cols[1].download_button("⬇️ Download", data=fh.read(), file_name=p.name, mime=None,
+                                                    key=f"dl_eds_{row['entry_id']}_{p.name}")
                     except Exception as e:
                         cols[1].warning(f"Download error: {e}")
 
-                    # Gemini nitel yorum
-                    analyze_key = f"an_eds_{row['entry_id']}_{p.name}"
-                    if cols[2].button("🤖 Yorumla", key=analyze_key):
+                    if cols[2].button("🤖 Yorumla", key=f"an_eds_{row['entry_id']}_{p.name}"):
                         with st.spinner("Gemini nitel yorumu hazırlanıyor..."):
                             if df_preview is not None and not df_preview.empty:
-                                result = eds_gemini_analyze_from_df(df_preview)
+                                st.info(eds_gemini_analyze_from_df(df_preview))
                             else:
-                                result = (
+                                st.info(
                                     "⚠️ CSV/TXT veri önizlemesi bulunamadı. EDS nitel yorumu için lütfen CSV/TXT dosyası yükleyin.\n"
                                     "PDF/DOCX doğrudan analiz edilmez; üretici yazılımından alınmış tabloyu CSV olarak ekleyin."
                                 )
-                        st.info(result)
 
             st.markdown("—")
-            # Silme butonu
             del_col = st.columns([1, 4])[0]
             if del_col.button("🗑️ Delete This Entry", key=f"del_{row['entry_id']}"):
                 try:
                     shutil.rmtree(BASE_DIR / row["entry_id"], ignore_errors=True)
                 except Exception as e:
                     st.error(f"Folder delete error: {e}")
-
                 new_df = records_df.loc[records_df["entry_id"] != row["entry_id"]].reset_index(drop=True)
                 save_records(new_df)
                 st.success("Entry deleted.")
