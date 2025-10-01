@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import base64
 import shutil
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional
@@ -46,11 +47,9 @@ def list_gemini_models(api_key: str) -> List[str]:
         names = []
         for m in genai.list_models():
             methods = getattr(m, "supported_generation_methods", []) or getattr(m, "generation_methods", [])
-            # Farklı SDK sürümlerine uyumlu kontrol
             methods = [str(x).lower() for x in methods]
-            if any("generatecontent" in x for x in methods) or "generateContent" in methods:
+            if any("generatecontent" in x for x in methods):
                 names.append(m.name)
-        # Örnek: ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'gemini-pro', ...]
         return sorted(set(names))
     except Exception:
         return []
@@ -67,15 +66,9 @@ def configure_gemini(api_key: str):
         return False, f"⚠️ Gemini yapılandırması başarısız: {e}"
 
 def try_model_variants(name: str):
-    """
-    Seçilen model adı için çalışır varyasyonu bul:
-    - verilen ad
-    - 'models/' önekli
-    - '-latest' ekli
-    - hem önek hem ek
-    """
+    """Verilen model adı için çalışır varyasyon kombine eder."""
     variants = []
-    base = name.strip()
+    base = (name or "").strip()
     if not base:
         return []
     variants.append(base)
@@ -85,13 +78,10 @@ def try_model_variants(name: str):
         variants.append(f"{base}-latest")
     if not base.startswith("models/") and not base.endswith("-latest"):
         variants.append(f"models/{base}-latest")
-    return list(dict.fromkeys(variants))  # benzersiz sırayı koru
+    return list(dict.fromkeys(variants))
 
 def pick_working_model(api_key: str, preferred: Optional[str], discovered: List[str]):
-    """
-    1) Kullanıcı seçimi varsa onun varyantlarını sırayla dene
-    2) Olmazsa discovered listesindeki modelleri sırayla dene
-    """
+    """Seçili adı ve keşfedilmiş listeyi sırayla dener, çalışan ilk modeli döndürür."""
     ok, err = configure_gemini(api_key)
     if not ok:
         return None, err
@@ -99,22 +89,19 @@ def pick_working_model(api_key: str, preferred: Optional[str], discovered: List[
     candidates: List[str] = []
     if preferred:
         candidates.extend(try_model_variants(preferred))
-    # discovered isimleri de (varsa) ekle
     for m in discovered:
         candidates.extend(try_model_variants(m))
-    # son çare olarak bilinen isimler
+    # bilinen iyi isimler
     candidates.extend([
         *try_model_variants("gemini-1.5-flash"),
         *try_model_variants("gemini-1.5-pro"),
         *try_model_variants("gemini-pro"),
     ])
     # tekrarları at
-    seen = set()
-    ordered = []
+    seen = set(); ordered = []
     for c in candidates:
         if c not in seen:
-            seen.add(c)
-            ordered.append(c)
+            seen.add(c); ordered.append(c)
 
     # hızlı sağlık kontrolü: kısa generate_content denemesi
     for name in ordered:
@@ -125,16 +112,15 @@ def pick_working_model(api_key: str, preferred: Optional[str], discovered: List[
                 return model, None
         except Exception:
             continue
-    return None, "⚠️ Uygun bir Gemini modeli bulunamadı. Lütfen `google-generativeai` paketini güncelleyin veya farklı bir model deneyin."
+    return None, "⚠️ Uygun bir Gemini modeli bulunamadı. `google-generativeai` paketini güncelleyin veya farklı bir model deneyin."
 
-# Sidebar: dinamik model listesi
-available = list_gemini_models(gemini_key_input.strip())
-if available:
-    selected_model = st.sidebar.selectbox("Model (erişilebilir)", available, index=0)
+available_models = list_gemini_models(gemini_key_input.strip())
+if available_models:
+    selected_model = st.sidebar.selectbox("Model (erişilebilir)", available_models, index=0)
 else:
     selected_model = st.sidebar.text_input(
         "Model adı (manuel)", value="gemini-1.5-flash",
-        help="Örn: gemini-1.5-flash, gemini-1.5-pro, gemini-pro veya list_models ile dönen ad."
+        help="Örn: gemini-1.5-flash, gemini-1.5-pro, gemini-pro veya list_models çıktısındaki ad."
     )
 
 # =========================
@@ -207,7 +193,7 @@ Lütfen nitel (kantitatif olmayan) bir rapor hazırla:
 """
 
 # =========================
-# Yardımcılar (Gemini)
+# Yardımcılar (Gemini & EDS Okuma)
 # =========================
 def image_to_inline_part(path: Path) -> dict:
     mime = "image/jpeg"
@@ -222,7 +208,48 @@ def image_to_inline_part(path: Path) -> dict:
     return {"inline_data": {"mime_type": mime, "data": data_b64}}
 
 def get_working_model():
-    return pick_working_model(gemini_key_input.strip(), selected_model, available)
+    return pick_working_model(gemini_key_input.strip(), selected_model, available_models)
+
+def read_table_flex(path: Path, max_probe_lines: int = 40) -> Optional[pd.DataFrame]:
+    """
+    EDS CSV/TXT dosyalarını esnek şekilde okumayı dener:
+    - Ayraç: otomatik (python engine), sonra ;, \\t, , sırayla
+    - Kodlama: utf-8, utf-8-sig, latin-1, cp1254
+    - Başlık öncesi meta satırları: Energy/keV/Counts/Intensity/Channel gibi başlık göstergelerine kadar atlar
+    - Ondalık ayırıcı: '.' ve ',' denemeleri
+    """
+    encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1254"]
+    seps = [None, ";", "\t", ","]  # None => engine='python' ile otomatik
+    decimals = [".", ","]
+    try:
+        text = path.read_text(errors="ignore")
+    except Exception:
+        text = ""
+    lines = text.splitlines() if text else []
+    header_idx = 0
+    pat = re.compile(r"(Energy|keV|Counts|Intensity|Channel)", re.IGNORECASE)
+    for i, ln in enumerate(lines[:max_probe_lines]):
+        if pat.search(ln) or ln.count(";") >= 2 or ln.count(",") >= 2 or ln.count("\t") >= 2:
+            header_idx = i
+            break
+
+    for enc in encodings:
+        for sep in seps:
+            for dec in decimals:
+                try:
+                    df = pd.read_csv(
+                        path,
+                        sep=sep,
+                        engine="python" if sep is None else "c",
+                        encoding=enc,
+                        skiprows=header_idx,
+                        decimal=dec,
+                    )
+                    if isinstance(df, pd.DataFrame) and df.shape[0] > 0 and df.shape[1] >= 2:
+                        return df
+                except Exception:
+                    continue
+    return None
 
 def sem_gemini_analyze(image_path: Path) -> str:
     model, err = get_working_model()
@@ -392,14 +419,21 @@ else:
                     shown = False
                     df_preview: Optional[pd.DataFrame] = None
                     try:
-                        if p.suffix.lower() == ".csv":
-                            df_preview = pd.read_csv(p)
-                            cols[0].dataframe(df_preview.head(20), use_container_width=True)
-                            shown = True
-                        elif p.suffix.lower() == ".txt":
-                            df_preview = pd.read_csv(p, sep=None, engine="python")
-                            cols[0].dataframe(df_preview.head(20), use_container_width=True)
-                            shown = True
+                        if p.suffix.lower() in [".csv", ".txt"]:
+                            df_preview = read_table_flex(p)
+                            if df_preview is not None:
+                                cols[0].dataframe(df_preview.head(20), use_container_width=True)
+                                shown = True
+                            else:
+                                cols[0].warning("Önizleme başarısız: Ayraç/kodlama/başlık tespiti yapılamadı. "
+                                                "Lütfen cihaz yazılımından CSV'yi ; veya , ayraçlı, UTF-8 kodlamalı dışa aktarın.")
+                        elif p.suffix.lower() == ".xlsx":
+                            try:
+                                df_preview = pd.read_excel(p, engine="openpyxl")
+                                cols[0].dataframe(df_preview.head(20), use_container_width=True)
+                                shown = True
+                            except Exception as e:
+                                cols[0].warning(f"Excel okuma hatası: {e}")
                     except Exception as e:
                         cols[0].warning(f"Preview error: {e}")
                     if not shown:
